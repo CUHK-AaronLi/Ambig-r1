@@ -1,0 +1,87 @@
+🔍 测试 Retrieval Server
+============================================================
+Server URL: http://127.0.0.1:8000
+测试查询数量: 3
+测试时间: 2025-10-24 16:26:24
+
+--- 查询 1: machine learning ---
+✅ 请求成功
+返回结果数量: 3
+
+📄 检索结果:
+
+  结果 1:
+    分数: 0.8629
+    标题: Edmund Rowe
+    内容: 1942, serving one term as president. Rowe was elected as a Republican to the Seventy-eighth Congress (January 3, 1943 – January 3, 1945).He was an uns...
+    ID: 10901146
+
+  结果 2:
+    分数: 0.8521
+    标题: Accidents Can Happen
+    内容: being commissioned.
+    ID: 8323868
+
+  结果 3:
+    分数: 0.8519
+    标题: Keiichiro Nagashima
+    内容: best placing in the other races was 13th in Erfurt, and though he was not relegated to the B division on 500 metres, he finished 18th in the overall W...
+    ID: 9579544
+
+⚠️  没有返回分数信息
+------------------------------------------------------------
+
+--- 查询 2: python ---
+✅ 请求成功
+返回结果数量: 3
+
+📄 检索结果:
+
+  结果 1:
+    分数: 0.8534
+    标题: Queen Mary University of London
+    内容: away in Bloomsbury. The Merger Cup is a series of annual sporting fixtures played between Queen Mary and Barts London sports clubs. The event has take...
+    ID: 2573527
+
+  结果 2:
+    分数: 0.8418
+    标题: Langkawi
+    内容: Langkawi Langkawi, officially known as Langkawi, the Jewel of Kedah (), is a district and an archipelago of 99 islands (+ 5 small islands visible only...
+    ID: 2573558
+
+  结果 3:
+    分数: 0.8380
+    标题: Sahle Selassie
+    内容: in a way, an archaic example of a welfare state." Sahle Selassie also worked to modernize his country, and like his contemporaries Goshu of Gojjam and...
+    ID: 6807736
+
+⚠️  没有返回分数信息
+------------------------------------------------------------
+
+--- 查询 3: computer science ---
+✅ 请求成功
+返回结果数量: 3
+
+📄 检索结果:
+
+  结果 1:
+    分数: 0.8830
+    标题: Pilar Arlando
+    内容: Pilar Arlando Pilar Carmelita Anastasia Arlando (born 1 September 1989 in Porto, Portugal) holds the title of Miss Singapore World for 2009-2010. Arla...
+    ID: 15428354
+
+  结果 2:
+    分数: 0.8781
+    标题: Welsh Football League
+    内容: Welsh Football League The Welsh Football League (also known as the Nathaniel Car Sales Welsh Football League for sponsorship reasons) is a club footba...
+    ID: 3147588
+
+  结果 3:
+    分数: 0.8429
+    标题: Vjekoslav Luburić
+    内容: In late June 1941, Luburić was dispatched to the Lika region, where he oversaw a series of massacres of Serbs, which served as the "casus belli" for t...
+    ID: 4018734
+
+⚠️  没有返回分数信息
+------------------------------------------------------------
+

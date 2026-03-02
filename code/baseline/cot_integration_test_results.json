@@ -1,0 +1,47 @@
+[
+  {
+    "test_case": 1,
+    "question": "What is Python?",
+    "expected_ambiguous": true,
+    "detected_ambiguous": true,
+    "correct": true,
+    "raw_response": "The question \"What is Python?\" is ambiguous because it could be interpreted in several ways. The user might be asking for a general definition of Python, its uses, its features, or its history. Given the document, Python is identified as a programming language created by Guido van Rossum, but the user's intent is not clear from the question alone.\n\nTherefore, the question is ambiguous. The clarifying question is: \"Are you asking for a general definition of Python, its uses, or its history?\"",
+    "parsed_response": {
+      "is_ambiguous": true,
+      "answer": "",
+      "clarifying_question": ": \"Are you asking for a general definition of Python, its uses, or its history?\"",
+      "analysis": "",
+      "raw_response": "The question \"What is Python?\" is ambiguous because it could be interpreted in several ways. The user might be asking for a general definition of Python, its uses, its features, or its history. Given the document, Python is identified as a programming language created by Guido van Rossum, but the user's intent is not clear from the question alone.\n\nTherefore, the question is ambiguous. The clarifying question is: \"Are you asking for a general definition of Python, its uses, or its history?\""
+    }
+  },
+  {
+    "test_case": 2,
+    "question": "What is the capital of France?",
+    "expected_ambiguous": false,
+    "detected_ambiguous": false,
+    "correct": true,
+    "raw_response": "The question \"What is the capital of France?\" is straightforward and directly asks for the capital city of France. The document provides the necessary information to answer this question, stating that the capital city of France is Paris. There are no multiple interpretations or unclear elements in the question.\n\nTherefore, the question is not ambiguous. The answer is Paris.",
+    "parsed_response": {
+      "is_ambiguous": false,
+      "answer": "Paris.",
+      "clarifying_question": "",
+      "analysis": "",
+      "raw_response": "The question \"What is the capital of France?\" is straightforward and directly asks for the capital city of France. The document provides the necessary information to answer this question, stating that the capital city of France is Paris. There are no multiple interpretations or unclear elements in the question.\n\nTherefore, the question is not ambiguous. The answer is Paris."
+    }
+  },
+  {
+    "test_case": 3,
+    "question": "How do I cook rice?",
+    "expected_ambiguous": true,
+    "detected_ambiguous": true,
+    "correct": true,
+    "raw_response": "Ambiguity Analysis: The question \"How do I cook rice?\" is ambiguous because it does not specify the type of rice or the cooking equipment available. Different types of rice, such as white, brown, basmati, or jasmine, may require different cooking methods. Additionally, the equipment used, such as a rice cooker, stovetop pot, or microwave, can also affect the cooking process.\n\nTherefore, the question is ambiguous. The clarifying question is: \"What type of rice are you cooking, and what equipment do you plan to use?\"",
+    "parsed_response": {
+      "is_ambiguous": true,
+      "answer": "",
+      "clarifying_question": ": \"What type of rice are you cooking, and what equipment do you plan to use?\"",
+      "analysis": "Ambiguity Analysis: The question \"How do I cook rice?\" is ambiguous because it does not specify the type of rice or the cooking equipment available. Different types of rice, such as white, brown, basmati, or jasmine, may require different cooking methods. Additionally, the equipment used, such as a rice cooker, stovetop pot, or microwave, can also affect the cooking process.",
+      "raw_response": "Ambiguity Analysis: The question \"How do I cook rice?\" is ambiguous because it does not specify the type of rice or the cooking equipment available. Different types of rice, such as white, brown, basmati, or jasmine, may require different cooking methods. Additionally, the equipment used, such as a rice cooker, stovetop pot, or microwave, can also affect the cooking process.\n\nTherefore, the question is ambiguous. The clarifying question is: \"What type of rice are you cooking, and what equipment do you plan to use?\""
+    }
+  }
+]

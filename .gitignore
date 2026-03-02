@@ -1,0 +1,28 @@
+# Checkpoint files
+verl_checkpoints/
+
+# Large data files
+data/ambignq/*_with_evidence_articles.json
+data/ambignq/*.zip
+data/ambignq/*.parquet
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Logs
+*.log
+
+# Weights and Biases
+wandb/
+
+# Output files
+outputs/
+out/
+
+
+# Training logs
+code/logs/
