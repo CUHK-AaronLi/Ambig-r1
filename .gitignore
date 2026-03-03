@@ -26,3 +26,4 @@ out/
 
 # Training logs
 code/logs/
+.DS_Store
