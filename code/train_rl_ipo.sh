@@ -35,8 +35,9 @@ cd /mnt/users_home/cpii.local/yli/Ambig-R1-new/code
 export DATA_DIR='scripts/data_process/data/ambignq_fewshot'
 export WAND_PROJECT='Ambig-R1'
 # Use SFT warmup checkpoint as base model (change path after SFT completes)
-export BASE_MODEL='verl_checkpoints/sft-clarify-warmup/global_step_final'
-export EXPERIMENT_NAME=rl-ipo
+# v2: epoch1 checkpoint (best val loss) + stronger KL + lower LR + fixed IG
+export BASE_MODEL='verl_checkpoints/sft-clarify-warmup/global_step_330'
+export EXPERIMENT_NAME=rl-ipo-v2
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_MODE=offline
 
@@ -71,7 +72,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     actor_rollout_ref.model.path=$BASE_MODEL \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.use_remove_padding=False \
-    actor_rollout_ref.actor.optim.lr=5e-7 \
+    actor_rollout_ref.actor.optim.lr=2e-7 \
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.2 \
     actor_rollout_ref.actor.use_kl_loss=true \
     actor_rollout_ref.actor.ppo_mini_batch_size=32 \
@@ -86,7 +87,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.kl_loss_coef=0.03 \
+    actor_rollout_ref.actor.kl_loss_coef=0.08 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     algorithm.no_think_rl=false \
     actor_rollout_ref.rollout.n_agent=5 \
@@ -96,7 +97,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     retriever.topk=3 \
     trainer.logger=['console','wandb'] \
     +trainer.val_only=false \
-    +trainer.val_before_train=false \
+    +trainer.val_before_train=true \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=50 \

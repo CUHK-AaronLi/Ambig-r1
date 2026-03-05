@@ -1,22 +1,20 @@
 """
-IPO Reward Manager — Information Gain Policy Optimization.
+IPO Reward Manager v2 — Information Gain Policy Optimization.
 
-Core innovation: turn-level dense reward based on information gain proxy.
-Distributes outcome credit across intermediate turns proportional to
-estimated contribution.
+v2 changes (fixing reward hacking from v1):
+  - Outcome-gated IG: only reward clarify turns when F1 >= threshold
+  - Baseline reward for clarify: small constant c_base to prevent collapse
+    even when F1=0 (ensures non-zero gradient for all samples)
+  - Penalty for unnecessary clarify: if no clarify and F1 is high,
+    give efficiency bonus (don't waste turns)
+  - Cap total IG per sample to prevent dominating F1
 
-Reward distribution:
-  - Each intermediate turn (clarify/search) gets:
-      ig_per_turn = alpha * F1 / n_intermediate_turns
-    placed at the closing tag position (</clarify> or </search>)
-  - F1 outcome reward at last valid token position.
-
-IG proxy rationale: If the model clarified and got the answer right, the
-clarification contributed to the information gain. If it clarified but
-still got it wrong, the clarification didn't help (ig_per_turn ≈ 0
-because F1 ≈ 0).
-
-alpha (default 0.5) controls IG vs outcome balance.
+Reward distribution per sample:
+  - Last token: F1 outcome reward
+  - Each clarify/search turn:
+      if F1 >= threshold: alpha * F1 / n_turns  (outcome-gated IG)
+      else:               c_base                 (small baseline, keeps gradients alive)
+  - No clarify + F1 >= threshold: efficiency bonus at last token
 """
 
 from verl import DataProto
@@ -24,12 +22,16 @@ import torch
 from verl.trainer.reward_utils import BaseRewardManager
 
 
-# Default IG balance coefficient
-DEFAULT_ALPHA = 0.5
+# Hyperparameters
+DEFAULT_ALPHA = 0.4       # IG weight (reduced from 0.5 to prevent dominating F1)
+F1_THRESHOLD = 0.3        # Minimum F1 to trigger full IG reward
+BASELINE_REWARD = 0.05    # Small constant per clarify turn (prevents zero-gradient)
+EFFICIENCY_BONUS = 0.15   # Bonus for answering correctly without clarify
+MAX_IG_PER_SAMPLE = 0.4   # Cap total IG to prevent reward hacking
 
 
 class IPORewardManager(BaseRewardManager):
-    """Information Gain Policy Optimization — turn-level dense reward."""
+    """Information Gain Policy Optimization v2 — outcome-gated turn reward."""
 
     def __init__(self, tokenizer, num_examine, format_score=0., n_agent=1,
                  alpha=DEFAULT_ALPHA):
@@ -73,21 +75,34 @@ class IPORewardManager(BaseRewardManager):
             ]
 
             n_intermediate = len(intermediate_positions)
+            ig_total = 0.0
 
-            # Distribute IG reward across intermediate turns
             if n_intermediate > 0:
-                ig_per_turn = self.alpha * f1 / n_intermediate
-                for action_type, token_idx in intermediate_positions:
-                    reward_tensor[i, token_idx] += ig_per_turn
+                if f1 >= F1_THRESHOLD:
+                    # Outcome-gated IG: clarify helped, reward proportionally
+                    ig_per_turn = self.alpha * f1 / n_intermediate
+                    ig_per_turn = min(ig_per_turn, MAX_IG_PER_SAMPLE / n_intermediate)
+                    for action_type, token_idx in intermediate_positions:
+                        reward_tensor[i, token_idx] += ig_per_turn
+                        ig_total += ig_per_turn
+                else:
+                    # F1 too low: give small baseline to keep gradients alive
+                    # This prevents the 70% F1=0 samples from being zero-signal
+                    for action_type, token_idx in intermediate_positions:
+                        reward_tensor[i, token_idx] += BASELINE_REWARD
+                        ig_total += BASELINE_REWARD
+            elif f1 >= F1_THRESHOLD and valid_response_length > 0:
+                # No clarify but answered correctly: efficiency bonus
+                reward_tensor[i, valid_response_length - 1] += EFFICIENCY_BONUS
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
-                ig_total = self.alpha * f1 if n_intermediate > 0 else 0.0
                 print(
-                    f"[IPO] F1={f1:.3f} intermediate_turns={n_intermediate} "
-                    f"IG_total={ig_total:.3f} | {response_str[:200]}"
+                    f"[IPOv2] F1={f1:.3f} n_turns={n_intermediate} "
+                    f"IG={ig_total:.3f} gated={'Y' if f1>=F1_THRESHOLD else 'N'} "
+                    f"| {response_str[:200]}"
                 )
 
         return reward_tensor

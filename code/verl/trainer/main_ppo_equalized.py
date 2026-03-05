@@ -1,11 +1,14 @@
 """
 Equalized Reward Manager — UserRL-style constant turn reward.
 
-Every clarify turn gets a constant +0.1 reward regardless of final correctness.
+Every clarify turn gets a constant +0.3 reward regardless of final correctness.
 Prevents collapse by ensuring non-zero reward for clarification behavior.
 Based on the UserRL paper approach.
 
-Reward = F1 (at last token) + 0.1 per clarify turn (at </clarify> token positions)
+v2 change: turn reward 0.1 → 0.3 to provide stronger signal for clarify behavior
+(0.1 was too small relative to F1 range [0,1], easily dominated by outcome reward).
+
+Reward = F1 (at last token) + 0.3 per clarify turn (at </clarify> token positions)
 """
 
 from verl import DataProto
@@ -14,7 +17,7 @@ from verl.trainer.reward_utils import BaseRewardManager
 
 
 # Constant reward per clarify turn
-CLARIFY_TURN_REWARD = 0.1
+CLARIFY_TURN_REWARD = 0.3
 
 
 class EqualizedRewardManager(BaseRewardManager):
