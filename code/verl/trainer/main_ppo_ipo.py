@@ -1,21 +1,27 @@
 """
-IPO Reward Manager v2 — Information Gain Policy Optimization.
+IPO Reward Manager v3 — Counterfactual Information Gain.
 
-v2 changes (fixing reward hacking from v1):
-  - Outcome-gated IG: only reward clarify turns when F1 >= threshold
-  - Baseline reward for clarify: small constant c_base to prevent collapse
-    even when F1=0 (ensures non-zero gradient for all samples)
-  - Penalty for unnecessary clarify: if no clarify and F1 is high,
-    give efficiency bonus (don't waste turns)
-  - Cap total IG per sample to prevent dominating F1
+Core innovation: per-turn IG measured by ablation scoring with the
+ref model. For each intermediate turn, we compute the ref model's
+confidence in the correct answer with vs without the turn's observation.
+delta = confidence_full - confidence_ablated.
+
+When ablation scores are available (from ray_trainer._compute_ablation_scores):
+  IG(k) = alpha * max(delta_k, 0) * f1  (outcome-gated, non-negative)
+
+When ablation scores are NOT available (fallback):
+  IG(k) = alpha * max(relevance_k, marginal_k) * f1  (text-overlap proxy)
 
 Reward distribution per sample:
   - Last token: F1 outcome reward
-  - Each clarify/search turn:
-      if F1 >= threshold: alpha * F1 / n_turns  (outcome-gated IG)
-      else:               c_base                 (small baseline, keeps gradients alive)
-  - No clarify + F1 >= threshold: efficiency bonus at last token
+  - Each clarify/search turn: IG reward (min: baseline_reward)
+  - No turns + F1 high: efficiency bonus
+  - Invalid action penalty: -0.1 per invalid turn (prevents format collapse)
 """
+
+import re
+import math
+from typing import List, Tuple, Dict
 
 from verl import DataProto
 import torch
@@ -23,15 +29,16 @@ from verl.trainer.reward_utils import BaseRewardManager
 
 
 # Hyperparameters
-DEFAULT_ALPHA = 0.4       # IG weight (reduced from 0.5 to prevent dominating F1)
-F1_THRESHOLD = 0.3        # Minimum F1 to trigger full IG reward
-BASELINE_REWARD = 0.05    # Small constant per clarify turn (prevents zero-gradient)
-EFFICIENCY_BONUS = 0.15   # Bonus for answering correctly without clarify
-MAX_IG_PER_SAMPLE = 0.4   # Cap total IG to prevent reward hacking
+DEFAULT_ALPHA = 0.5       # IG weight
+BASELINE_REWARD = 0.05    # Small constant per turn (prevents zero-gradient)
+EFFICIENCY_BONUS = 0.15   # Bonus for answering correctly without any turns
+MAX_IG_PER_SAMPLE = 0.5   # Cap total IG
+INVALID_PENALTY = -0.1    # Penalty per invalid action (prevents format collapse)
+CONFIDENCE_BETA = 0.1     # Weight for answer confidence bonus
 
 
 class IPORewardManager(BaseRewardManager):
-    """Information Gain Policy Optimization v2 — outcome-gated turn reward."""
+    """Information Gain Policy Optimization v3 — counterfactual IG."""
 
     def __init__(self, tokenizer, num_examine, format_score=0., n_agent=1,
                  alpha=DEFAULT_ALPHA):
@@ -45,7 +52,14 @@ class IPORewardManager(BaseRewardManager):
         batch_size = len(data)
         reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
 
+        has_log_probs = 'old_log_probs' in data.batch.keys()
         already_print_data_sources = {}
+
+        # Check for ablation scores from ray_trainer
+        ablation_scores = data.non_tensor_batch.get('ablation_scores', None)
+        use_ablation = ablation_scores is not None
+        ablation_used_count = 0
+        fallback_count = 0
 
         for i in range(batch_size):
             data_item = data[i]
@@ -60,54 +74,198 @@ class IPORewardManager(BaseRewardManager):
             references = self._extract_references(ground_truth)
             f1 = self._max_f1(answer_pred, references)
 
-            # Place F1 outcome reward at last valid token
+            # ============================================================
+            # 1. F1 outcome reward at last valid token
+            # ============================================================
             if valid_response_length > 0:
                 reward_tensor[i, valid_response_length - 1] = f1
 
-            # Find intermediate turn boundaries (clarify and search, NOT answer)
-            turn_positions = self.find_turn_token_positions(
-                response_str, self.tokenizer
-            )
-            intermediate_positions = [
-                (action_type, token_idx)
-                for action_type, token_idx in turn_positions
-                if action_type in ('clarify', 'search') and token_idx < valid_response_length
+            # ============================================================
+            # 2. Parse turns with their observations
+            # ============================================================
+            turns = self._parse_turns_with_observations(response_str)
+            intermediate_turns = [
+                t for t in turns if t['type'] in ('clarify', 'search')
             ]
 
-            n_intermediate = len(intermediate_positions)
+            # ============================================================
+            # 3. Compute per-turn IG (ablation or fallback)
+            # ============================================================
+            n_intermediate = len(intermediate_turns)
             ig_total = 0.0
+            ig_details = []
+            ig_source = "none"
 
             if n_intermediate > 0:
-                if f1 >= F1_THRESHOLD:
-                    # Outcome-gated IG: clarify helped, reward proportionally
-                    ig_per_turn = self.alpha * f1 / n_intermediate
-                    ig_per_turn = min(ig_per_turn, MAX_IG_PER_SAMPLE / n_intermediate)
-                    for action_type, token_idx in intermediate_positions:
-                        reward_tensor[i, token_idx] += ig_per_turn
-                        ig_total += ig_per_turn
+                # Try ablation scores first
+                sample_ablation = None
+                if use_ablation and ablation_scores[i] is not None:
+                    sample_ablation = ablation_scores[i]  # list of (turn_type, delta)
+
+                if sample_ablation is not None and len(sample_ablation) > 0:
+                    # ---- Ablation-based IG (v3 counterfactual) ----
+                    ig_source = "ablation"
+                    ablation_used_count += 1
+                    for turn_type, delta in sample_ablation:
+                        # Outcome-gated, non-negative
+                        ig_reward = self.alpha * max(delta, 0.0) * f1
+                        # Floor at baseline
+                        ig_reward = max(ig_reward, BASELINE_REWARD)
+
+                        ig_details.append({
+                            'type': turn_type,
+                            'delta': delta,
+                            'reward': ig_reward,
+                        })
+                        ig_total += ig_reward
                 else:
-                    # F1 too low: give small baseline to keep gradients alive
-                    # This prevents the 70% F1=0 samples from being zero-signal
-                    for action_type, token_idx in intermediate_positions:
-                        reward_tensor[i, token_idx] += BASELINE_REWARD
-                        ig_total += BASELINE_REWARD
-            elif f1 >= F1_THRESHOLD and valid_response_length > 0:
-                # No clarify but answered correctly: efficiency bonus
+                    # ---- Fallback: text-overlap proxy (v2 style) ----
+                    ig_source = "fallback"
+                    fallback_count += 1
+                    cumulative_obs = ""
+                    prev_confidence = 0.0
+
+                    for turn in intermediate_turns:
+                        obs = turn['observation']
+                        individual_relevance = self._max_f1(obs, references) if obs else 0.0
+
+                        cumulative_obs += " " + obs if obs else ""
+                        curr_confidence = self._max_f1(cumulative_obs.strip(), references) if cumulative_obs.strip() else 0.0
+                        marginal_gain = max(curr_confidence - prev_confidence, 0.0)
+                        prev_confidence = curr_confidence
+
+                        ig_raw = max(individual_relevance, marginal_gain)
+                        ig_reward = self.alpha * ig_raw * f1
+                        ig_reward = max(ig_reward, BASELINE_REWARD)
+
+                        ig_details.append({
+                            'type': turn['type'],
+                            'delta': ig_raw,
+                            'reward': ig_reward,
+                        })
+                        ig_total += ig_reward
+
+                # Cap total IG
+                if ig_total > MAX_IG_PER_SAMPLE:
+                    scale = MAX_IG_PER_SAMPLE / ig_total
+                    for d in ig_details:
+                        d['reward'] *= scale
+                    ig_total = MAX_IG_PER_SAMPLE
+
+                # Place IG rewards at turn token positions
+                turn_positions = self.find_turn_token_positions(
+                    response_str, self.tokenizer
+                )
+                intermediate_positions = [
+                    (action_type, token_idx)
+                    for action_type, token_idx in turn_positions
+                    if action_type in ('clarify', 'search') and token_idx < valid_response_length
+                ]
+                for idx, (action_type, token_idx) in enumerate(intermediate_positions):
+                    if idx < len(ig_details):
+                        reward_tensor[i, token_idx] += ig_details[idx]['reward']
+
+            elif f1 > 0 and valid_response_length > 0:
+                # No intermediate turns but answered correctly: efficiency bonus
                 reward_tensor[i, valid_response_length - 1] += EFFICIENCY_BONUS
 
+            # ============================================================
+            # 4. Invalid action penalty
+            # ============================================================
+            n_invalid = self._count_invalid_actions(response_str)
+            if n_invalid > 0 and valid_response_length > 0:
+                penalty = INVALID_PENALTY * n_invalid
+                reward_tensor[i, valid_response_length - 1] += penalty
+
+            # ============================================================
+            # 5. Answer confidence bonus (from log-probs)
+            # ============================================================
+            confidence = 0.0
+            if has_log_probs and valid_response_length > 0 and CONFIDENCE_BETA > 0:
+                confidence = self._compute_answer_confidence(
+                    data, i, decoded['prompt_length'], valid_response_length, response_str
+                )
+                reward_tensor[i, valid_response_length - 1] += CONFIDENCE_BETA * confidence
+
+            # ============================================================
+            # Logging
+            # ============================================================
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
+                detail_str = " ".join(
+                    f"{d['type'][0]}:d={d.get('delta', 0):.3f}/r={d['reward']:.3f}"
+                    for d in ig_details
+                ) if ig_details else "none"
                 print(
-                    f"[IPOv2] F1={f1:.3f} n_turns={n_intermediate} "
-                    f"IG={ig_total:.3f} gated={'Y' if f1>=F1_THRESHOLD else 'N'} "
+                    f"[IPOv3] F1={f1:.3f} turns={n_intermediate} invalid={n_invalid} "
+                    f"IG={ig_total:.3f}({ig_source}) conf={confidence:.3f} [{detail_str}] "
                     f"| {response_str[:200]}"
                 )
 
+        if use_ablation:
+            print(f"[IPOv3] Ablation stats: {ablation_used_count} ablation, {fallback_count} fallback, "
+                  f"{batch_size - ablation_used_count - fallback_count} no-turns")
+
         return reward_tensor
 
+    # ------------------------------------------------------------------
+    # Observation parsing (delegates to BaseRewardManager._parse_observations)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_turns_with_observations(response_str: str) -> List[Dict]:
+        """Parse response into turns with their observations.
 
+        Each turn = { type, content, observation, char_start, char_end, obs_start, obs_end }
+        """
+        return BaseRewardManager._parse_observations(response_str)
+
+    # ------------------------------------------------------------------
+    # Invalid action counting
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _count_invalid_actions(response_str: str) -> int:
+        """Count invalid action attempts (format errors like (search> etc.)."""
+        # Count "My previous action is invalid" messages from env
+        n = len(re.findall(r'My previous action is invalid', response_str, re.IGNORECASE))
+        return n
+
+    # ------------------------------------------------------------------
+    # Answer confidence from log-probs
+    # ------------------------------------------------------------------
+    def _compute_answer_confidence(self, data: DataProto, idx: int,
+                                    prompt_length: int,
+                                    valid_response_length: int,
+                                    response_str: str) -> float:
+        """Average log-prob of answer tokens → sigmoid → [0, 1] confidence."""
+        match = re.search(r'<answer>(.*?)</answer>', response_str, re.DOTALL)
+        if not match:
+            return 0.0
+
+        prefix_text = response_str[:match.start()] + '<answer>'
+        answer_content = match.group(1)
+        if not answer_content.strip():
+            return 0.0
+
+        n_prefix = len(self.tokenizer.encode(prefix_text, add_special_tokens=False))
+        n_answer = len(self.tokenizer.encode(answer_content, add_special_tokens=False))
+        if n_answer == 0:
+            return 0.0
+
+        log_probs = data.batch['old_log_probs'][idx]
+        end_idx = min(n_prefix + n_answer, valid_response_length)
+        answer_lp = log_probs[n_prefix:end_idx].float()
+        if answer_lp.numel() == 0:
+            return 0.0
+
+        avg_lp = answer_lp.mean().item()
+        return float(1.0 / (1.0 + math.exp(-avg_lp - 1.0)))
+
+
+# ==================================================================
+# Training entry point (unchanged)
+# ==================================================================
 import ray
 import hydra
 
@@ -174,7 +332,7 @@ def main_task(config):
     else:
         raise NotImplementedError
 
-    from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
+    from verl.trainer.ppo.ray_trainer import RayPPOTrainer, ResourcePoolManager, Role
 
     role_worker_mapping = {
         Role.ActorRollout: ray.remote(ActorRolloutRefWorker),

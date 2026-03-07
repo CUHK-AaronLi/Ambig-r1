@@ -846,6 +846,15 @@ class RayPPOTrainer(object):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
 
+                    # ---- Ablation scoring for IPO v3 ----
+                    if getattr(self.config, 'ipo', None) and getattr(self.config.ipo, 'enable_ablation', False):
+                        if self.use_reference_policy:
+                            with _timer('ablation', timing_raw):
+                                ablation_scores = self._compute_ablation_scores(batch)
+                                batch.non_tensor_batch['ablation_scores'] = ablation_scores
+                        else:
+                            print("[IPOv3-Ablation] WARNING: enable_ablation=true but no ref policy, skipping")
+
                     with _timer('adv', timing_raw):
                         # compute scores. Support both model and function-based.
                         # We first compute the scores using reward model. Then, we call reward_fn to combine
@@ -948,7 +957,7 @@ class RayPPOTrainer(object):
         """Create loss mask for state tokens."""
         response_length = batch.batch['responses'].shape[-1]
         response_mask = batch.batch['attention_mask'][:, -response_length:]
-        
+
         loss_mask = batch.batch['info_mask'][:, -response_length:]
         batch.batch['loss_mask'] = loss_mask
 
@@ -956,5 +965,184 @@ class RayPPOTrainer(object):
             'state_tokens/total': loss_mask.sum().item(),
             'state_tokens/coverage': (loss_mask.sum() / response_mask.sum()).item(),
         })
-        
+
         return batch, metrics
+
+    def _compute_ablation_scores(self, batch: DataProto) -> np.ndarray:
+        """Compute counterfactual IG via ablation scoring with the ref model.
+
+        For each sample with intermediate turns (search/clarify), constructs
+        ablated contexts (with each turn's observation removed) and scores
+        the correct answer tokens under both full and ablated contexts.
+
+        Returns:
+            np.array of dtype=object, length=batch_size. Each element is either
+            None (no intermediate turns) or a list of (turn_type, delta) tuples
+            where delta = confidence_full - confidence_ablated.
+        """
+        from verl.trainer.reward_utils import BaseRewardManager
+
+        batch_size = len(batch)
+        results = np.empty(batch_size, dtype=object)
+
+        # Collect all ablation pairs across the batch
+        all_pairs = []   # (sample_idx, pair_idx, turn_type, full_ids, ablated_ids, ans_start_full, ans_start_abl, ans_len)
+        sample_pair_counts = []
+
+        for i in range(batch_size):
+            data_item = batch[i]
+            decoded = BaseRewardManager.decode_response(
+                BaseRewardManager(self.tokenizer, num_examine=0), data_item
+            )
+            response_str = decoded['response_str']
+            ground_truth = decoded['ground_truth']
+            valid_prompt_ids = decoded['valid_prompt_ids']
+
+            answer_pred = BaseRewardManager._extract_answer_text(response_str)
+            references = BaseRewardManager._extract_references(ground_truth)
+
+            ablation_inputs = BaseRewardManager.build_ablation_inputs(
+                response_str=response_str,
+                tokenizer=self.tokenizer,
+                prompt_ids=valid_prompt_ids,
+                references=references,
+                answer_pred=answer_pred,
+            )
+
+            if ablation_inputs is None:
+                results[i] = None
+                sample_pair_counts.append(0)
+                continue
+
+            sample_pair_counts.append(len(ablation_inputs))
+            for pair_idx, pair in enumerate(ablation_inputs):
+                all_pairs.append((
+                    i, pair_idx, pair['turn_type'],
+                    pair['full_ids'], pair['ablated_ids'],
+                    pair['answer_start_full'], pair['answer_start_ablated'],
+                    pair['answer_token_len'],
+                ))
+
+        if not all_pairs:
+            print("[IPOv3-Ablation] No intermediate turns found, skipping ablation scoring")
+            return results
+
+        # Build batched tensors for ref model forward pass
+        # We need both full and ablated contexts → 2 * len(all_pairs) sequences
+        all_seqs = []
+        all_ans_lens = []
+        for (_, _, _, full_ids, ablated_ids, _, _, alen) in all_pairs:
+            all_seqs.append(full_ids)
+            all_ans_lens.append(alen)
+            all_seqs.append(ablated_ids)
+            all_ans_lens.append(alen)
+
+        # Pad n_seqs to be divisible by world_size (required by DataProto.chunk)
+        world_size = self.actor_rollout_wg.world_size
+        n_seqs_real = len(all_seqs)
+        remainder = n_seqs_real % world_size
+        if remainder != 0:
+            pad_count = world_size - remainder
+            for _ in range(pad_count):
+                all_seqs.append(all_seqs[-1])  # duplicate last seq as padding
+                all_ans_lens.append(all_ans_lens[-1])
+
+        # Pad sequences to uniform length
+        max_len = max(len(s) for s in all_seqs)
+        pad_id = self.tokenizer.pad_token_id or 0
+        n_seqs = len(all_seqs)
+
+        input_ids = torch.full((n_seqs, max_len), pad_id, dtype=torch.long)
+        attention_mask = torch.zeros((n_seqs, max_len), dtype=torch.long)
+        position_ids = torch.zeros((n_seqs, max_len), dtype=torch.long)
+
+        for j, seq in enumerate(all_seqs):
+            seq_len = len(seq)
+            # Right-align (left-pad) to match the model's convention
+            offset = max_len - seq_len
+            input_ids[j, offset:] = torch.tensor(seq, dtype=torch.long)
+            attention_mask[j, offset:] = 1
+            position_ids[j, offset:] = torch.arange(seq_len, dtype=torch.long)
+
+        # For compute_ref_log_prob, "responses" = the portion we want log_probs for.
+        # Must be RIGHT-aligned: answer tokens at the end, pad on the left,
+        # so that logits[:, -max_ans_len-1:-1] aligns correctly with answers.
+        max_ans_len = max(all_ans_lens)
+        responses = torch.full((n_seqs, max_ans_len), pad_id, dtype=torch.long)
+        for j, seq in enumerate(all_seqs):
+            alen = all_ans_lens[j]
+            # Right-align: pad on left, answer tokens on right
+            offset = max_ans_len - alen
+            responses[j, offset:] = torch.tensor(seq[-alen:], dtype=torch.long)
+
+        # Process in micro-batches to avoid OOM
+        micro_batch_size = 8
+        all_log_probs = []
+
+        for mb_start in range(0, n_seqs, micro_batch_size):
+            mb_end = min(mb_start + micro_batch_size, n_seqs)
+            mb_input_ids = input_ids[mb_start:mb_end]
+            mb_attention_mask = attention_mask[mb_start:mb_end]
+            mb_position_ids = position_ids[mb_start:mb_end]
+            mb_responses = responses[mb_start:mb_end]
+
+            # Build DataProto for ref model
+            mb_data = DataProto.from_dict(
+                tensors={
+                    'input_ids': mb_input_ids,
+                    'attention_mask': mb_attention_mask,
+                    'position_ids': mb_position_ids,
+                    'responses': mb_responses,
+                }
+            )
+            mb_data.meta_info = {
+                'micro_batch_size': micro_batch_size,
+                'temperature': 1.0,
+            }
+
+            # Forward pass through ref model (no_grad is a no-op for remote
+            # calls but signals intent)
+            ref_output = self.ref_policy_wg.compute_ref_log_prob(mb_data)
+            # ref_log_prob shape: [mb_size, max_ans_len]
+            mb_log_probs = ref_output.batch['ref_log_prob'].cpu().float()
+            all_log_probs.append(mb_log_probs)
+
+        all_log_probs = torch.cat(all_log_probs, dim=0)  # [n_seqs, max_ans_len]
+        # Discard padding sequences
+        all_log_probs = all_log_probs[:n_seqs_real]
+
+        # Compute confidence deltas
+        pair_idx_offset = 0
+        for i in range(batch_size):
+            n_pairs = sample_pair_counts[i]
+            if n_pairs == 0:
+                continue
+
+            deltas = []
+            for p in range(n_pairs):
+                seq_idx = (pair_idx_offset + p) * 2  # full context index
+                alen = all_ans_lens[seq_idx]  # full and ablated share the same answer length
+
+                # Mean log prob over answer tokens (right-aligned, so last `alen` positions)
+                ans_offset = max_ans_len - alen
+                full_lp = all_log_probs[seq_idx, ans_offset:].mean().item()
+                ablated_lp = all_log_probs[seq_idx + 1, ans_offset:].mean().item()
+
+                turn_type = all_pairs[pair_idx_offset + p][2]
+                delta = full_lp - ablated_lp
+                deltas.append((turn_type, delta))
+
+            results[i] = deltas
+            pair_idx_offset += n_pairs
+
+        # Log summary
+        n_with_turns = sum(1 for r in results if r is not None)
+        all_deltas = [d for r in results if r is not None for _, d in r]
+        if all_deltas:
+            mean_delta = np.mean(all_deltas)
+            print(f"[IPOv3-Ablation] {n_with_turns}/{batch_size} samples scored, "
+                  f"mean_delta={mean_delta:.4f}, n_pairs={len(all_deltas)}")
+        else:
+            print(f"[IPOv3-Ablation] No valid ablation pairs computed")
+
+        return results

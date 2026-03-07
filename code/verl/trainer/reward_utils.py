@@ -9,9 +9,10 @@ reuse them without code duplication.
 import re
 import math
 from collections import Counter
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 import numpy as np
+import torch
 
 
 class BaseRewardManager:
@@ -214,3 +215,131 @@ class BaseRewardManager:
             n_tokens = len(tokenizer.encode(prefix, add_special_tokens=False))
             results.append((action_type, n_tokens - 1))  # -1 for 0-indexed
         return results
+
+    # ------------------------------------------------------------------
+    # Ablation scoring (IPO v3 counterfactual IG)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_observations(response_str: str) -> List[Dict]:
+        """Parse response into turns with observations (search/clarify only).
+
+        Returns list of dicts with keys:
+            type, content, observation, char_start, char_end,
+            obs_start, obs_end  (char positions of the observation block)
+        """
+        turns = []
+        for tag in ('search', 'clarify', 'answer'):
+            for match in re.finditer(
+                rf'<{tag}>(.*?)</{tag}>', response_str, re.DOTALL | re.IGNORECASE
+            ):
+                turns.append({
+                    'type': tag,
+                    'content': match.group(1).strip(),
+                    'char_start': match.start(),
+                    'char_end': match.end(),
+                    'observation': '',
+                    'obs_start': -1,
+                    'obs_end': -1,
+                })
+        turns.sort(key=lambda x: x['char_start'])
+
+        for idx, turn in enumerate(turns):
+            end = turn['char_end']
+            next_start = turns[idx + 1]['char_start'] if idx + 1 < len(turns) else len(response_str)
+            between = response_str[end:next_start]
+
+            info_match = re.search(
+                r'<information>(.*?)</information>', between, re.DOTALL | re.IGNORECASE
+            )
+            if info_match:
+                turn['observation'] = info_match.group(1).strip()
+                turn['obs_start'] = end + info_match.start()
+                turn['obs_end'] = end + info_match.end()
+                continue
+
+            user_match = re.search(
+                r'<user_response>(.*?)</user_response>', between, re.DOTALL | re.IGNORECASE
+            )
+            if user_match:
+                turn['observation'] = user_match.group(1).strip()
+                turn['obs_start'] = end + user_match.start()
+                turn['obs_end'] = end + user_match.end()
+
+        return turns
+
+    @staticmethod
+    def build_ablation_inputs(
+        response_str: str,
+        tokenizer,
+        prompt_ids: torch.Tensor,
+        references: List[str],
+        answer_pred: str,
+    ) -> Optional[List[Dict]]:
+        """Build ablated inputs for counterfactual IG scoring.
+
+        For each intermediate turn (search/clarify), constructs:
+        - full context: prompt + response + best_ref_answer tokens
+        - ablated context: prompt + response (with turn's observation removed) + best_ref_answer tokens
+
+        The ref model will score the correct answer tokens given each context.
+        Confidence delta = mean_log_prob(full) - mean_log_prob(ablated).
+
+        Args:
+            response_str: decoded response string
+            tokenizer: HF tokenizer
+            prompt_ids: 1D tensor of valid prompt token ids
+            references: list of reference answer strings
+            answer_pred: model's predicted answer string
+
+        Returns:
+            List of dicts with keys:
+                turn_type, full_ids, ablated_ids, answer_start_full,
+                answer_start_ablated, answer_token_len
+            Returns None if no intermediate turns with observations.
+        """
+        if not references:
+            return None
+
+        # Select best reference answer (highest F1 with prediction)
+        best_ref = max(references, key=lambda r: BaseRewardManager._f1_score(answer_pred, r))
+        ref_tokens = tokenizer.encode(best_ref, add_special_tokens=False)
+        if not ref_tokens:
+            return None
+
+        # Parse turns
+        turns = BaseRewardManager._parse_observations(response_str)
+        intermediate = [t for t in turns if t['type'] in ('search', 'clarify') and t['observation']]
+        if not intermediate:
+            return None
+
+        # Encode full response once; full context is shared across all turns
+        response_tokens = tokenizer.encode(response_str, add_special_tokens=False)
+        prompt_list = prompt_ids.tolist()
+        full_ids = prompt_list + response_tokens + ref_tokens
+        answer_start_full = len(prompt_list) + len(response_tokens)
+
+        results = []
+        for turn in intermediate:
+            # Build ablated response: remove the observation block
+            if turn['obs_start'] >= 0 and turn['obs_end'] >= 0:
+                ablated_response = (
+                    response_str[:turn['obs_start']] +
+                    response_str[turn['obs_end']:]
+                )
+            else:
+                continue
+
+            ablated_response_tokens = tokenizer.encode(ablated_response, add_special_tokens=False)
+            ablated_ids = prompt_list + ablated_response_tokens + ref_tokens
+
+            results.append({
+                'turn_type': turn['type'],
+                'full_ids': full_ids,
+                'ablated_ids': ablated_ids,
+                'answer_start_full': answer_start_full,
+                'answer_start_ablated': len(prompt_list) + len(ablated_response_tokens),
+                'answer_token_len': len(ref_tokens),
+            })
+
+        return results if results else None
+

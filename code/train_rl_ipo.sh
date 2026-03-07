@@ -35,9 +35,9 @@ cd /mnt/users_home/cpii.local/yli/Ambig-R1-new/code
 export DATA_DIR='scripts/data_process/data/ambignq_fewshot'
 export WAND_PROJECT='Ambig-R1'
 # Use SFT warmup checkpoint as base model (change path after SFT completes)
-# v2: epoch1 checkpoint (best val loss) + stronger KL + lower LR + fixed IG
+# v3: counterfactual IG via ablation scoring + invalid action penalty
 export BASE_MODEL='verl_checkpoints/sft-clarify-warmup/global_step_330'
-export EXPERIMENT_NAME=rl-ipo-v2
+export EXPERIMENT_NAME=rl-ipo-v3
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_MODE=offline
 
@@ -118,6 +118,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     +ambigqa.azure_openai_deployment="gpt-4o" \
     +ambigqa.enable_entropy=false \
     +ipo.alpha=0.5 \
+    +ipo.enable_ablation=true \
     2>&1 | tee $EXPERIMENT_NAME.log
 
 echo "Job finished at: $(date)"
