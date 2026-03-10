@@ -6,6 +6,8 @@ no consistency. Known to cause collapse in multi-turn settings; serves as
 the lower-bound baseline for ablation experiments.
 """
 
+import re
+
 from verl import DataProto
 import torch
 from verl.trainer.reward_utils import BaseRewardManager
@@ -14,8 +16,11 @@ from verl.trainer.reward_utils import BaseRewardManager
 class OutcomeOnlyRewardManager(BaseRewardManager):
     """Pure F1 outcome reward — simplest baseline."""
 
-    def __init__(self, tokenizer, num_examine, format_score=0., n_agent=1):
+    def __init__(self, tokenizer, num_examine, format_score=0., n_agent=1,
+                 turn_cost=0.0, turn_cost_free=0):
         super().__init__(tokenizer, num_examine, format_score, n_agent)
+        self.turn_cost = turn_cost
+        self.turn_cost_free = turn_cost_free
 
     def __call__(self, data: DataProto):
         if 'rm_scores' in data.batch.keys():
@@ -43,11 +48,22 @@ class OutcomeOnlyRewardManager(BaseRewardManager):
             if valid_response_length > 0:
                 reward_tensor[i, valid_response_length - 1] = f1
 
+            # Turn cost penalty
+            n_clarify = len(re.findall(r'<clarify>.*?</clarify>', response_str, re.DOTALL | re.IGNORECASE))
+            n_search = len(re.findall(r'<search>.*?</search>', response_str, re.DOTALL | re.IGNORECASE))
+            n_intermediate = n_clarify + n_search
+            turn_penalty = 0.0
+            if self.turn_cost > 0 and n_intermediate > self.turn_cost_free and valid_response_length > 0:
+                billable = n_intermediate - self.turn_cost_free
+                turn_penalty = -self.turn_cost * billable
+                reward_tensor[i, valid_response_length - 1] += turn_penalty
+
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
-                print(f"[OutcomeOnly] F1={f1:.3f} | {response_str[:200]}")
+                tc_str = f" tc={turn_penalty:.3f}" if self.turn_cost > 0 else ""
+                print(f"[OutcomeOnly] F1={f1:.3f} clarify={n_clarify} search={n_search}{tc_str} | {response_str[:200]}")
 
         return reward_tensor
 
@@ -149,12 +165,24 @@ def main_task(config):
 
     n_agent = config.actor_rollout_ref.rollout.n_agent if hasattr(config.actor_rollout_ref.rollout, 'n_agent') else 1
 
+    # Read outcome config
+    turn_cost = 0.0
+    turn_cost_free = 0
+    if hasattr(config, 'outcome'):
+        if hasattr(config.outcome, 'turn_cost'):
+            turn_cost = config.outcome.turn_cost
+        if hasattr(config.outcome, 'turn_cost_free'):
+            turn_cost_free = int(config.outcome.turn_cost_free)
+    print(f"[OutcomeOnly] turn_cost={turn_cost}, turn_cost_free={turn_cost_free}, n_agent={n_agent}")
+
     log_main("Creating OutcomeOnly reward manager")
     reward_fn = OutcomeOnlyRewardManager(
-        tokenizer=tokenizer, num_examine=1, n_agent=n_agent
+        tokenizer=tokenizer, num_examine=1, n_agent=n_agent,
+        turn_cost=turn_cost, turn_cost_free=turn_cost_free,
     )
     val_reward_fn = OutcomeOnlyRewardManager(
-        tokenizer=tokenizer, num_examine=2, n_agent=1
+        tokenizer=tokenizer, num_examine=2, n_agent=1,
+        turn_cost=turn_cost, turn_cost_free=turn_cost_free,
     )
 
     log_main("Creating resource pool manager")

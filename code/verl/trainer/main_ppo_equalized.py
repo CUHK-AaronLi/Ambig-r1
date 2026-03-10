@@ -24,9 +24,12 @@ class EqualizedRewardManager(BaseRewardManager):
     """F1 outcome + constant reward per clarify turn (UserRL-style)."""
 
     def __init__(self, tokenizer, num_examine, format_score=0., n_agent=1,
-                 clarify_turn_reward=CLARIFY_TURN_REWARD):
+                 clarify_turn_reward=CLARIFY_TURN_REWARD, turn_cost=0.0,
+                 turn_cost_free=0):
         super().__init__(tokenizer, num_examine, format_score, n_agent)
         self.clarify_turn_reward = clarify_turn_reward
+        self.turn_cost = turn_cost
+        self.turn_cost_free = turn_cost_free  # first N turns are free
 
     def __call__(self, data: DataProto):
         if 'rm_scores' in data.batch.keys():
@@ -54,21 +57,34 @@ class EqualizedRewardManager(BaseRewardManager):
             if valid_response_length > 0:
                 reward_tensor[i, valid_response_length - 1] = f1
 
-            # Place constant reward at each </clarify> token position
+            # Place constant reward at each clarify/search token position
             turn_positions = self.find_turn_token_positions(
                 response_str, self.tokenizer
             )
             n_clarify = 0
+            n_search = 0
             for action_type, token_idx in turn_positions:
-                if action_type == 'clarify' and token_idx < valid_response_length:
+                if action_type in ('clarify', 'search') and token_idx < valid_response_length:
                     reward_tensor[i, token_idx] += self.clarify_turn_reward
-                    n_clarify += 1
+                    if action_type == 'clarify':
+                        n_clarify += 1
+                    else:
+                        n_search += 1
+
+            # Turn cost penalty (applied to turns beyond turn_cost_free)
+            n_intermediate = n_clarify + n_search
+            turn_penalty = 0.0
+            if self.turn_cost > 0 and n_intermediate > self.turn_cost_free and valid_response_length > 0:
+                billable = n_intermediate - self.turn_cost_free
+                turn_penalty = -self.turn_cost * billable
+                reward_tensor[i, valid_response_length - 1] += turn_penalty
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0
             if already_print_data_sources[data_source] < self.num_examine:
                 already_print_data_sources[data_source] += 1
-                print(f"[Equalized] F1={f1:.3f} clarify_turns={n_clarify} | {response_str[:200]}")
+                tc_str = f" tc={turn_penalty:.3f}" if self.turn_cost > 0 else ""
+                print(f"[Equalized] F1={f1:.3f} clarify={n_clarify} search={n_search}{tc_str} | {response_str[:200]}")
 
         return reward_tensor
 
@@ -170,12 +186,29 @@ def main_task(config):
 
     n_agent = config.actor_rollout_ref.rollout.n_agent if hasattr(config.actor_rollout_ref.rollout, 'n_agent') else 1
 
+    # Read equalized config
+    reward_per_turn = CLARIFY_TURN_REWARD
+    turn_cost = 0.0
+    turn_cost_free = 0
+    if hasattr(config, 'equalized'):
+        if hasattr(config.equalized, 'reward_per_turn'):
+            reward_per_turn = config.equalized.reward_per_turn
+        if hasattr(config.equalized, 'turn_cost'):
+            turn_cost = config.equalized.turn_cost
+        if hasattr(config.equalized, 'turn_cost_free'):
+            turn_cost_free = int(config.equalized.turn_cost_free)
+    print(f"[Equalized] reward_per_turn={reward_per_turn}, turn_cost={turn_cost}, turn_cost_free={turn_cost_free}, n_agent={n_agent}")
+
     log_main("Creating Equalized reward manager")
     reward_fn = EqualizedRewardManager(
-        tokenizer=tokenizer, num_examine=1, n_agent=n_agent
+        tokenizer=tokenizer, num_examine=1, n_agent=n_agent,
+        clarify_turn_reward=reward_per_turn, turn_cost=turn_cost,
+        turn_cost_free=turn_cost_free,
     )
     val_reward_fn = EqualizedRewardManager(
-        tokenizer=tokenizer, num_examine=2, n_agent=1
+        tokenizer=tokenizer, num_examine=2, n_agent=1,
+        clarify_turn_reward=reward_per_turn, turn_cost=turn_cost,
+        turn_cost_free=turn_cost_free,
     )
 
     log_main("Creating resource pool manager")

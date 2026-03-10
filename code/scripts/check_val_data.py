@@ -55,11 +55,15 @@ def check_val_data(path: str):
             except Exception:
                 extra_info = {}
 
-        # Ground truth
+        # Ground truth — check both top-level reward_model column and extra_info
         gt = None
-        rm = extra_info.get('reward_model', {})
+        rm = row.get('reward_model', None)
         if isinstance(rm, dict):
             gt = rm.get('ground_truth', None)
+        if gt is None:
+            rm2 = extra_info.get('reward_model', {})
+            if isinstance(rm2, dict):
+                gt = rm2.get('ground_truth', None)
 
         if gt is None:
             empty_gt += 1
@@ -80,8 +84,9 @@ def check_val_data(path: str):
             if len(refs) == 0:
                 empty_gt += 1
 
-        # Ambiguity label (if present)
-        ambig = extra_info.get('is_ambiguous', extra_info.get('ambiguous', None))
+        # Ambiguity label (check top-level column first, then extra_info)
+        ambig = row.get('_is_ambiguous', extra_info.get('_is_ambiguous',
+                extra_info.get('is_ambiguous', extra_info.get('ambiguous', None))))
         if ambig is not None:
             has_ambig_label += 1
             if ambig:
@@ -89,8 +94,8 @@ def check_val_data(path: str):
             else:
                 non_ambig_count += 1
 
-        # Question
-        q = extra_info.get('question', row.get('question', ''))
+        # Question (top-level column preferred)
+        q = row.get('question', extra_info.get('question', ''))
         if q:
             question_lengths.append(len(q))
 
@@ -132,8 +137,9 @@ def check_val_data(path: str):
                 extra_info = ast.literal_eval(extra_info)
             except Exception:
                 extra_info = {}
-        q = extra_info.get('question', '')[:100]
-        gt = extra_info.get('reward_model', {}).get('ground_truth', None)
+        q = str(row.get('question', ''))[:100]
+        rm = row.get('reward_model', None)
+        gt = rm.get('ground_truth', None) if isinstance(rm, dict) else None
         gt_str = str(gt)[:100] if gt else "EMPTY"
         print(f"  [{idx}] Q: {q}")
         print(f"       GT: {gt_str}")
