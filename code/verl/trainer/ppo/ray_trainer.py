@@ -476,6 +476,7 @@ class RayPPOTrainer(object):
         import torch
         reward_tensor_lst = []
         data_source_lst = []
+        all_test_batches = []  # collect for raw F1 computation
 
         clarify_url = None
         enable_clarify = False
@@ -538,6 +539,7 @@ class RayPPOTrainer(object):
 
                 reward_tensor_lst.append(reward_tensor)
                 data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
+                all_test_batches.append(test_batch)
         else:
             for batch_dict in self.val_dataloader:  
                 timing_raw = {}
@@ -573,6 +575,7 @@ class RayPPOTrainer(object):
 
                     reward_tensor_lst.append(reward_tensor)
                     data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
+                    all_test_batches.append(test_batch)
 
         reward_tensor = torch.cat([rw.sum(-1) for rw in reward_tensor_lst], dim=0).cpu()  # (batch_size,)
         # reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
@@ -589,8 +592,82 @@ class RayPPOTrainer(object):
         for data_source, rewards in data_source_reward.items():
             metric_dict[f'val/test_score/{data_source}'] = np.mean(rewards)
 
+        # ---- Raw F1 + action distribution (independent of reward manager) ----
+        try:
+            raw_metrics = self._compute_raw_val_metrics(all_test_batches)
+            metric_dict.update(raw_metrics)
+        except Exception as e:
+            print(f"[Val] Warning: raw F1 computation failed: {e}")
+
         return metric_dict
 
+    def _compute_raw_val_metrics(self, all_test_batches):
+        """Compute raw F1, answer extraction rate, and action distribution from val batches.
+
+        These metrics are independent of the reward manager and directly comparable
+        with competitor baselines (UserRL, A²Search, etc.).
+        """
+        from verl.trainer.reward_utils import BaseRewardManager
+
+        per_source = {}  # data_source -> {f1s, answer_extracted, clarify, search, answer, total}
+
+        for test_batch in all_test_batches:
+            batch_size = len(test_batch)
+            for i in range(batch_size):
+                data_item = test_batch[i]
+                # Decode response
+                prompt_ids = data_item.batch['prompts']
+                prompt_length = prompt_ids.shape[-1]
+                valid_response_length = int(data_item.batch['attention_mask'][prompt_length:].sum())
+                response_ids = data_item.batch['responses'][:valid_response_length]
+                response_str = self.tokenizer.decode(response_ids)
+
+                ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
+                data_source = data_item.non_tensor_batch.get('data_source', 'unknown')
+
+                if data_source not in per_source:
+                    per_source[data_source] = {
+                        'f1s': [], 'answer_extracted': 0,
+                        'clarify': 0, 'search': 0, 'answer': 0, 'total': 0,
+                    }
+                stats = per_source[data_source]
+                stats['total'] += 1
+
+                # Extract answer and compute raw F1
+                answer_pred = BaseRewardManager._extract_answer_text(response_str)
+                references = BaseRewardManager._extract_references(ground_truth)
+                f1 = BaseRewardManager._max_f1(answer_pred, references)
+                stats['f1s'].append(f1)
+
+                # Check if <answer> tag was present
+                if re.search(r'<answer>.*?</answer>', response_str, re.DOTALL | re.IGNORECASE):
+                    stats['answer_extracted'] += 1
+
+                # Count action types
+                n_clarify = len(re.findall(r'<clarify>.*?</clarify>', response_str, re.DOTALL | re.IGNORECASE))
+                n_search = len(re.findall(r'<search>.*?</search>', response_str, re.DOTALL | re.IGNORECASE))
+                n_answer = len(re.findall(r'<answer>.*?</answer>', response_str, re.DOTALL | re.IGNORECASE))
+                stats['clarify'] += n_clarify
+                stats['search'] += n_search
+                stats['answer'] += n_answer
+
+        metrics = {}
+        for ds, stats in per_source.items():
+            n = stats['total']
+            if n == 0:
+                continue
+            metrics[f'val/f1/{ds}'] = np.mean(stats['f1s'])
+            metrics[f'val/answer_rate/{ds}'] = stats['answer_extracted'] / n
+            total_actions = stats['clarify'] + stats['search'] + stats['answer']
+            if total_actions > 0:
+                metrics[f'val/clarify_rate/{ds}'] = stats['clarify'] / total_actions
+                metrics[f'val/search_rate/{ds}'] = stats['search'] / total_actions
+                metrics[f'val/answer_action_rate/{ds}'] = stats['answer'] / total_actions
+            metrics[f'val/avg_clarify/{ds}'] = stats['clarify'] / n
+            metrics[f'val/avg_search/{ds}'] = stats['search'] / n
+
+        print(f"[Val Raw Metrics] {metrics}")
+        return metrics
 
     def init_workers(self):
         """Init resource pool and worker group"""

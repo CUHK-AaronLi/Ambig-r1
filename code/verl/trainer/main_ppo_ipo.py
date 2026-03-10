@@ -41,9 +41,10 @@ class IPORewardManager(BaseRewardManager):
     """Information Gain Policy Optimization v3 — counterfactual IG."""
 
     def __init__(self, tokenizer, num_examine, format_score=0., n_agent=1,
-                 alpha=DEFAULT_ALPHA):
+                 alpha=DEFAULT_ALPHA, turn_cost=0.0):
         super().__init__(tokenizer, num_examine, format_score, n_agent)
         self.alpha = alpha
+        self.turn_cost = turn_cost
 
     def __call__(self, data: DataProto):
         if 'rm_scores' in data.batch.keys():
@@ -170,7 +171,14 @@ class IPORewardManager(BaseRewardManager):
                 reward_tensor[i, valid_response_length - 1] += EFFICIENCY_BONUS
 
             # ============================================================
-            # 4. Invalid action penalty
+            # 4. Turn cost penalty (penalize excessive clarify/search)
+            # ============================================================
+            if self.turn_cost > 0 and n_intermediate > 0 and valid_response_length > 0:
+                turn_penalty = -self.turn_cost * n_intermediate
+                reward_tensor[i, valid_response_length - 1] += turn_penalty
+
+            # ============================================================
+            # 5. Invalid action penalty
             # ============================================================
             n_invalid = self._count_invalid_actions(response_str)
             if n_invalid > 0 and valid_response_length > 0:
@@ -178,7 +186,7 @@ class IPORewardManager(BaseRewardManager):
                 reward_tensor[i, valid_response_length - 1] += penalty
 
             # ============================================================
-            # 5. Answer confidence bonus (from log-probs)
+            # 6. Answer confidence bonus (from log-probs)
             # ============================================================
             confidence = 0.0
             if has_log_probs and valid_response_length > 0 and CONFIDENCE_BETA > 0:
@@ -198,9 +206,10 @@ class IPORewardManager(BaseRewardManager):
                     f"{d['type'][0]}:d={d.get('delta', 0):.3f}/r={d['reward']:.3f}"
                     for d in ig_details
                 ) if ig_details else "none"
+                tc_str = f" tc={-self.turn_cost * n_intermediate:.3f}" if self.turn_cost > 0 else ""
                 print(
                     f"[IPOv3] F1={f1:.3f} turns={n_intermediate} invalid={n_invalid} "
-                    f"IG={ig_total:.3f}({ig_source}) conf={confidence:.3f} [{detail_str}] "
+                    f"IG={ig_total:.3f}({ig_source}) conf={confidence:.3f}{tc_str} [{detail_str}] "
                     f"| {response_str[:200]}"
                 )
 
@@ -363,18 +372,24 @@ def main_task(config):
 
     n_agent = config.actor_rollout_ref.rollout.n_agent if hasattr(config.actor_rollout_ref.rollout, 'n_agent') else 1
 
-    # Read alpha from config if provided, otherwise use default
+    # Read alpha and turn_cost from config if provided
     alpha = DEFAULT_ALPHA
-    if hasattr(config, 'ipo') and hasattr(config.ipo, 'alpha'):
-        alpha = config.ipo.alpha
-    print(f"[IPO] alpha={alpha}, n_agent={n_agent}")
+    turn_cost = 0.0
+    if hasattr(config, 'ipo'):
+        if hasattr(config.ipo, 'alpha'):
+            alpha = config.ipo.alpha
+        if hasattr(config.ipo, 'turn_cost'):
+            turn_cost = config.ipo.turn_cost
+    print(f"[IPO] alpha={alpha}, turn_cost={turn_cost}, n_agent={n_agent}")
 
     log_main("Creating IPO reward manager")
     reward_fn = IPORewardManager(
-        tokenizer=tokenizer, num_examine=1, n_agent=n_agent, alpha=alpha
+        tokenizer=tokenizer, num_examine=1, n_agent=n_agent, alpha=alpha,
+        turn_cost=turn_cost,
     )
     val_reward_fn = IPORewardManager(
-        tokenizer=tokenizer, num_examine=2, n_agent=1, alpha=alpha
+        tokenizer=tokenizer, num_examine=2, n_agent=1, alpha=alpha,
+        turn_cost=turn_cost,
     )
 
     log_main("Creating resource pool manager")
