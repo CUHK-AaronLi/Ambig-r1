@@ -41,10 +41,16 @@ class IPORewardManager(BaseRewardManager):
     """Information Gain Policy Optimization v3 — counterfactual IG."""
 
     def __init__(self, tokenizer, num_examine, format_score=0., n_agent=1,
-                 alpha=DEFAULT_ALPHA, turn_cost=0.0):
+                 alpha=DEFAULT_ALPHA, turn_cost=0.0,
+                 efficiency_bonus=EFFICIENCY_BONUS,
+                 baseline_reward=BASELINE_REWARD,
+                 clarify_bonus=0.0):
         super().__init__(tokenizer, num_examine, format_score, n_agent)
         self.alpha = alpha
         self.turn_cost = turn_cost
+        self.efficiency_bonus = efficiency_bonus
+        self.baseline_reward = baseline_reward
+        self.clarify_bonus = clarify_bonus
 
     def __call__(self, data: DataProto):
         if 'rm_scores' in data.batch.keys():
@@ -111,7 +117,10 @@ class IPORewardManager(BaseRewardManager):
                         # Outcome-gated, non-negative
                         ig_reward = self.alpha * max(delta, 0.0) * f1
                         # Floor at baseline
-                        ig_reward = max(ig_reward, BASELINE_REWARD)
+                        ig_reward = max(ig_reward, self.baseline_reward)
+                        # Clarify bonus: extra incentive for clarify actions
+                        if turn_type == 'clarify' and self.clarify_bonus > 0:
+                            ig_reward += self.clarify_bonus
 
                         ig_details.append({
                             'type': turn_type,
@@ -137,7 +146,10 @@ class IPORewardManager(BaseRewardManager):
 
                         ig_raw = max(individual_relevance, marginal_gain)
                         ig_reward = self.alpha * ig_raw * f1
-                        ig_reward = max(ig_reward, BASELINE_REWARD)
+                        ig_reward = max(ig_reward, self.baseline_reward)
+                        # Clarify bonus: extra incentive for clarify actions
+                        if turn['type'] == 'clarify' and self.clarify_bonus > 0:
+                            ig_reward += self.clarify_bonus
 
                         ig_details.append({
                             'type': turn['type'],
@@ -166,9 +178,9 @@ class IPORewardManager(BaseRewardManager):
                     if idx < len(ig_details):
                         reward_tensor[i, token_idx] += ig_details[idx]['reward']
 
-            elif f1 > 0 and valid_response_length > 0:
+            elif f1 > 0 and valid_response_length > 0 and self.efficiency_bonus > 0:
                 # No intermediate turns but answered correctly: efficiency bonus
-                reward_tensor[i, valid_response_length - 1] += EFFICIENCY_BONUS
+                reward_tensor[i, valid_response_length - 1] += self.efficiency_bonus
 
             # ============================================================
             # 4. Turn cost penalty (penalize excessive clarify/search)
@@ -207,9 +219,10 @@ class IPORewardManager(BaseRewardManager):
                     for d in ig_details
                 ) if ig_details else "none"
                 tc_str = f" tc={-self.turn_cost * n_intermediate:.3f}" if self.turn_cost > 0 else ""
+                cb_str = f" cb={self.clarify_bonus:.3f}" if self.clarify_bonus > 0 else ""
                 print(
                     f"[IPOv3] F1={f1:.3f} turns={n_intermediate} invalid={n_invalid} "
-                    f"IG={ig_total:.3f}({ig_source}) conf={confidence:.3f}{tc_str} [{detail_str}] "
+                    f"IG={ig_total:.3f}({ig_source}) conf={confidence:.3f}{tc_str}{cb_str} [{detail_str}] "
                     f"| {response_str[:200]}"
                 )
 
@@ -372,24 +385,36 @@ def main_task(config):
 
     n_agent = config.actor_rollout_ref.rollout.n_agent if hasattr(config.actor_rollout_ref.rollout, 'n_agent') else 1
 
-    # Read alpha and turn_cost from config if provided
+    # Read IPO hyperparameters from config
     alpha = DEFAULT_ALPHA
     turn_cost = 0.0
+    efficiency_bonus = EFFICIENCY_BONUS
+    baseline_reward = BASELINE_REWARD
+    clarify_bonus = 0.0
     if hasattr(config, 'ipo'):
         if hasattr(config.ipo, 'alpha'):
             alpha = config.ipo.alpha
         if hasattr(config.ipo, 'turn_cost'):
             turn_cost = config.ipo.turn_cost
-    print(f"[IPO] alpha={alpha}, turn_cost={turn_cost}, n_agent={n_agent}")
+        if hasattr(config.ipo, 'efficiency_bonus'):
+            efficiency_bonus = config.ipo.efficiency_bonus
+        if hasattr(config.ipo, 'baseline_reward'):
+            baseline_reward = config.ipo.baseline_reward
+        if hasattr(config.ipo, 'clarify_bonus'):
+            clarify_bonus = config.ipo.clarify_bonus
+    print(f"[IPO] alpha={alpha}, turn_cost={turn_cost}, efficiency_bonus={efficiency_bonus}, "
+          f"baseline_reward={baseline_reward}, clarify_bonus={clarify_bonus}, n_agent={n_agent}")
 
     log_main("Creating IPO reward manager")
     reward_fn = IPORewardManager(
         tokenizer=tokenizer, num_examine=1, n_agent=n_agent, alpha=alpha,
-        turn_cost=turn_cost,
+        turn_cost=turn_cost, efficiency_bonus=efficiency_bonus,
+        baseline_reward=baseline_reward, clarify_bonus=clarify_bonus,
     )
     val_reward_fn = IPORewardManager(
         tokenizer=tokenizer, num_examine=2, n_agent=1, alpha=alpha,
-        turn_cost=turn_cost,
+        turn_cost=turn_cost, efficiency_bonus=efficiency_bonus,
+        baseline_reward=baseline_reward, clarify_bonus=clarify_bonus,
     )
 
     log_main("Creating resource pool manager")
