@@ -147,6 +147,13 @@ class DataParallelPPOActor(BasePPOActor):
             grad_norm = self.actor_module.clip_grad_norm_(max_norm=self.config.grad_clip)
         else:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.grad_clip)
+
+        # Skip optimizer step if gradients contain NaN/Inf to prevent model corruption
+        if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+            print(f"[WARNING] NaN/Inf grad_norm detected ({grad_norm.item():.4f}), skipping optimizer step")
+            self.actor_optimizer.zero_grad()
+            return grad_norm
+
         self.actor_optimizer.step()
         return grad_norm
 

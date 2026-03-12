@@ -106,11 +106,17 @@ class LLMGenerationManager:
         return next_obs_ids
 
     def _prepare_clarify_metadata(self, rollings: DataProto) -> List[Dict[str, Any]]:
-        """Prepare clarify metadata for user simulator (generic, dataset-agnostic)."""
+        """Prepare clarify metadata for user simulator (generic, dataset-agnostic).
+
+        v2: Also extracts golden_answers as answer_hints for:
+        - Answer leakage detection in simulator (Stengel-Eskin et al. 2025)
+        - Better simulator prompts (can give contextual hints without revealing answer)
+        """
 
         batch_size = rollings.batch['input_ids'].shape[0]
         extra_info_array = rollings.non_tensor_batch.get('extra_info', [])
         data_source_array = rollings.non_tensor_batch.get('data_source')
+        reward_model_array = rollings.non_tensor_batch.get('reward_model', [])
 
         def _extract_extra(idx):
             if isinstance(extra_info_array, (list, tuple)):
@@ -132,6 +138,22 @@ class LLMGenerationManager:
                 pass
             if isinstance(extra_info_array, dict):
                 return extra_info_array
+            return {}
+
+        def _extract_reward_model(idx):
+            """Extract reward_model dict for a given index."""
+            if isinstance(reward_model_array, (list, tuple)):
+                return reward_model_array[idx] if idx < len(reward_model_array) else {}
+            try:
+                import numpy as np
+                if isinstance(reward_model_array, np.ndarray):
+                    if idx < len(reward_model_array):
+                        item = reward_model_array[idx]
+                        return item if isinstance(item, dict) else {}
+            except ImportError:
+                pass
+            if isinstance(reward_model_array, dict):
+                return reward_model_array
             return {}
 
         def _pick_value(source, idx):
@@ -156,12 +178,25 @@ class LLMGenerationManager:
             unambig_q = sample_extra.get('gold_question') or sample_extra.get('unambiguous_question') or ambig_q
             clarify_context = sample_extra.get('clarify_context') or sample_extra.get('user_simulator_context', '')
 
+            # Extract golden answers for answer leakage detection
+            answer_hints = []
+            rm_data = _extract_reward_model(i)
+            if isinstance(rm_data, dict):
+                gt = rm_data.get('ground_truth', {})
+                if isinstance(gt, dict):
+                    target = gt.get('target', [])
+                    if hasattr(target, 'tolist'):
+                        answer_hints = target.tolist()
+                    elif isinstance(target, (list, tuple)):
+                        answer_hints = list(target)
+
             metadata.append(
                 {
                     'ambiguous_question': ambig_q,
                     'unambiguous_question': unambig_q,
                     'data_source': data_source,
                     'clarify_context': clarify_context,
+                    'answer_hints': answer_hints,
                 }
             )
         return metadata
@@ -806,12 +841,19 @@ If I want to give the final answer, I should put the answer between <answer> and
                 unambiguous_q = (metadata.get('unambiguous_question') or metadata.get('gold_question') or ambiguous_q).strip()
                 context = (metadata.get('clarify_context') or metadata.get('context') or "").strip()
 
+                # Extract answer_hints for leakage detection
+                answer_hints = metadata.get('answer_hints', [])
+                if answer_hints and not isinstance(answer_hints, list):
+                    answer_hints = [str(answer_hints)]
+                answer_hints = [str(a) for a in answer_hints if str(a).strip()]
+
                 clarify_queries.append({
                     "question": ambiguous_q,
                     "clarification_question": str(query) if query else "",
                     "unambiguous_question": unambiguous_q,
                     "context": context,
                     "data_source": str(metadata.get('data_source', 'generic')),
+                    "answer_hints": answer_hints if answer_hints else None,
                 })
 
             print(f"[DEBUG] Sending {len(clarify_queries)} clarify queries to {self.config.clarify_url}")

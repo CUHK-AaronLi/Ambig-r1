@@ -83,35 +83,153 @@ class BatchQueryResponse(BaseModel):
 
 def create_simulation_prompt(query: ClarifyQuery) -> str:
     """
-    Create prompt for simulating user responses
+    Create prompt for simulating user responses.
+
+    v2: Rewritten to produce natural, informative user responses.
+    Key changes from v1:
+    - Removed "reference example" language (was leaking into responses)
+    - Removed ACTION format requirement (was polluting training data)
+    - Natural user persona instead of agent instructions
+    - Explicit requirement for disambiguating information (not just yes/no)
+    - Handles identical ambiguous/unambiguous questions gracefully
     """
     ambig_q = query.question.strip()
     unambig_q = (query.unambiguous_question or query.reference_question or "").strip()
     clarif_q = query.clarification_question.strip()
     context_block = query.context.strip()
 
-    prompt = f"""You are a helpful agent whose goal is to clarify a potentially ambiguous question. You have access to a question in two
-forms. One is a potentially ambiguous form and the other is an unambiguous form of that question.
-You will also be given a clarification question issued by a different agent that only has access to the ambiguous question
-and is trying to clarify it. Your only job is to answer the clarification question to the best of your ability. It is
-possible that the ambiguous and unambiguous questions are identical.
-You are not allowed to directly reveal information about the unambiguous question. You are only allowed to answer the
-clarification question based on the unambiguous version of the question. If the clarification question is not answerable
-from the unambiguous question, you should answer that you do not know the answer. Again, **NEVER** just repeat the
-unambiguous question as an answer. In addition, **NEVER** clarify the question using information that is not inferred
-from the unambiguous question. You will get a prize if you manage to complete the task successfully. Always respond in a
-single line with the format
-'ACTION : **ANSWER_CLARIFICATION** : <the answer to the clarification question>'
-Now for the real data:
-Potentially ambiguous question: {ambig_q}
-Unambiguous question: {unambig_q}
-Clarification question: {clarif_q}"""
+    # Check if the question is actually ambiguous
+    is_same_question = (ambig_q.lower().rstrip('?').strip() == unambig_q.lower().rstrip('?').strip())
 
-    # 如有额外上下文，附加在末尾
+    if is_same_question or not unambig_q:
+        # Non-ambiguous case: the user's question is already clear
+        prompt = f"""You are a user who asked the following question:
+"{ambig_q}"
+
+An AI assistant is trying to clarify your question and asked:
+"{clarif_q}"
+
+Your question is already clear and does not need clarification. Respond naturally as a user would.
+
+Rules:
+- Politely indicate that your question is straightforward and doesn't need clarification
+- You may restate what you're asking in slightly different words
+- Keep your response under 50 words
+- Do NOT use any special format — just respond naturally
+
+Example responses:
+- "My question is straightforward — I'm just asking about [topic]."
+- "I think my question is clear. I want to know [what you asked]."
+- "No need to clarify — just answer the question as stated.\""""
+    else:
+        # Ambiguous case: provide disambiguating information
+        # NOTE: answer_hints are intentionally NOT included in the prompt.
+        # A real user knows what they meant (unambiguous_question) but does NOT
+        # know the answer — that's why they're asking. answer_hints are only
+        # used in clean_simulator_response() for leakage detection.
+
+        prompt = f"""You are a user who asked the question: "{ambig_q}"
+
+What you actually meant was: "{unambig_q}"
+
+CRITICAL CONSTRAINTS:
+1. You do NOT know the answer to your own question — you are just a user seeking help.
+2. Keep your intended meaning private — do NOT directly repeat or reveal the unambiguous version of your question.
+3. If the assistant's clarifying question is asking for the answer itself (e.g., "What year specifically?", "Which person?"), respond that this is beyond what you know — you are asking because you DON'T know the answer.
+
+An AI assistant is trying to help you and asked this clarifying question:
+"{clarif_q}"
+
+Respond naturally as a real user would. Keep your response under 50 words. ONLY answer what is directly asked — do not volunteer extra information.
+
+IMPORTANT — match your response to the quality of the clarification question:
+
+1. **Precise question that identifies the exact ambiguity** (e.g., "Are you asking about X or Y?"):
+   → Confirm briefly. "Yes, the Tracey Ullman shorts." is a perfect response. Do NOT add extra info.
+
+2. **Somewhat relevant but vague question** (e.g., "Can you be more specific?"):
+   → Give only a minimal hint. Do NOT dump all disambiguating details at once.
+
+3. **Off-topic or nonsensical question**:
+   → Say "That's not what I meant" with at most a small nudge toward the right direction.
+
+4. **Question that asks for the answer itself** (e.g., "What year?" "Which person?"):
+   → Refuse: "I don't know, that's why I'm asking." You may add a brief clarifying detail about your intent.
+
+Key rules:
+- It IS okay to respond with just "Yes, [brief confirmation]." if the question deserves it
+- NEVER give away the answer to your question
+- NEVER volunteer information that wasn't asked for
+- NEVER use meta-language like "reference example", "unambiguous question", etc.
+
+Examples:
+- Q: "The Tracey Ullman shorts or the standalone series?" → "The Tracey Ullman shorts."
+- Q: "Can you be more specific?" → "I mean the very first time they appeared on TV."
+- Q: "What year did it air?" → "I don't know the year — that's what I'm asking."
+- Q: "Are you asking about cooking?" → "No, that's not what I meant at all.\""""
+
+    # Add context if available
     if context_block:
-        prompt += f"\nContext (for your reference only, do not leak it): {context_block}"
+        prompt += f"\n\nAdditional context (for your reference, do not reveal): {context_block}"
 
     return prompt
+
+
+def clean_simulator_response(response: str, gold_answers: Optional[List[str]] = None) -> str:
+    """
+    Post-process GPT-4o response to remove format artifacts and fix quality issues.
+
+    Handles:
+    - "ACTION : **ANSWER_CLARIFICATION** :" prefix from old prompt format
+    - "reference example" language leaking from prompt
+    - Answer leakage detection (Stengel-Eskin et al. 2025)
+    - Meta-language leaks ("unambiguous question", etc.)
+
+    Args:
+        response: Raw GPT-4o response
+        gold_answers: Optional list of gold answers for leakage detection
+    """
+    import re as _re
+
+    # Strip ACTION format prefix (from old prompt or GPT-4o habit)
+    response = _re.sub(
+        r"^ACTION\s*:\s*\*\*ANSWER_CLARIFICATION\*\*\s*:\s*",
+        "", response, flags=_re.IGNORECASE
+    ).strip()
+
+    # Strip surrounding quotes if GPT wrapped the response
+    if len(response) >= 2 and response[0] == '"' and response[-1] == '"':
+        response = response[1:-1].strip()
+
+    # Replace "reference example" leak with natural response
+    if _re.search(r"(irrelevant|not relevant)\s+(to\s+)?the\s+reference\s+example", response, _re.IGNORECASE):
+        response = "That's not what I meant. Could you ask something more specific about my question?"
+
+    # Replace other meta-language leaks
+    if "unambiguous question" in response.lower() or "unambiguous version" in response.lower():
+        response = "I'm not sure what you're asking. Could you rephrase your question?"
+
+    # Answer leakage detection: if the response contains the gold answer,
+    # replace with a generic redirect (prevents shortcut learning)
+    if gold_answers:
+        resp_lower = response.lower()
+        for ans in gold_answers:
+            ans_str = str(ans).strip().lower()
+            if ans_str and len(ans_str) > 2 and ans_str in resp_lower:
+                logger.warning(f"Answer leakage detected: '{ans_str}' found in response '{response[:80]}...'")
+                response = "I don't know the exact answer — that's why I'm asking. But I can clarify what I mean if you ask more specifically."
+                break
+
+    # Truncate overly long responses (enforce ~50 word limit)
+    words = response.split()
+    if len(words) > 60:
+        response = " ".join(words[:50]) + "..."
+
+    # Ensure non-empty
+    if not response.strip():
+        response = "I'm not sure how to answer that. Could you ask a more specific question?"
+
+    return response.strip()
 
 def simulate_user_response(query: ClarifyQuery, max_retries: int = 1) -> str:
     """
@@ -131,15 +249,27 @@ def simulate_user_response(query: ClarifyQuery, max_retries: int = 1) -> str:
                 model=AZURE_DEPLOYMENT,
                 messages=[
                     {
+                        "role": "system",
+                        "content": "You are simulating a user who asked a question. "
+                                   "Respond naturally and concisely (under 50 words). "
+                                   "Only answer what is asked — do not volunteer extra information. "
+                                   "You do NOT know the answer to your question — never provide it."
+                    },
+                    {
                         "role": "user",
                         "content": prompt
                     }
                 ],
-                max_tokens=200,
+                max_tokens=150,
                 temperature=0.7,
             )
 
             response = completion.choices[0].message.content.strip()
+            # Pass answer_hints for leakage detection
+            gold_answers = None
+            if hasattr(query, 'answer_hints') and query.answer_hints:
+                gold_answers = query.answer_hints
+            response = clean_simulator_response(response, gold_answers=gold_answers)
             return response
 
         except (APIConnectionError, ConnectionError) as e:

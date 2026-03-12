@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name="ipo-v6c-2g"
+#SBATCH --job-name="ipo-v5b-2g"
 #SBATCH --account=pgs
 #SBATCH --qos=low
 #SBATCH --partition=gemini
@@ -28,14 +28,14 @@ export DATA_DIR=scripts/data_process/data/ambignq_fewshot
 export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new/code/verl_checkpoints/sft-clarify-warmup/global_step_330
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_MODE=offline
-export EXPERIMENT_NAME=ipo-v6c-2gpu
+export EXPERIMENT_NAME=ipo-v5b-2gpu
 export AZURE_ENDPOINT="https://cpii-s5.openai.azure.com/"
 export AZURE_API_KEY="91e5ea9bf61c4769a44b0b0b5c67d559"
 export AZURE_DEPLOYMENT="gpt-4o"
 export AZURE_API_VERSION="2024-02-01"
 
-echo "===== IPO v6c: Strong bonus (clarify_bonus=0.20, turn_cost=0.00) ====="
-echo "Purpose: Maximum clarify incentive upper bound (diagnostic)"
+echo "===== IPO v5b 2-GPU: Ablation (counterfactual IG, no efficiency bonus, alpha=0.3, tc=0.03) ====="
+echo "2-GPU version: batch halved, per-GPU workload identical to 4-GPU"
 
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     data.train_files=$DATA_DIR/train.parquet \
@@ -57,7 +57,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.2 \
     actor_rollout_ref.actor.use_kl_loss=true \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
-    actor_rollout_ref.actor.ppo_micro_batch_size=2 \
+    actor_rollout_ref.actor.ppo_micro_batch_size=4 \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=false \
     actor_rollout_ref.actor.fsdp_config.grad_offload=false \
@@ -65,7 +65,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.35 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=8 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.kl_loss_coef=0.08 \
@@ -97,11 +97,10 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     +ambigqa.azure_openai_deployment="gpt-4o" \
     +ambigqa.enable_entropy=false \
     +ipo.alpha=0.3 \
-    +ipo.turn_cost=0.00 \
-    +ipo.enable_ablation=false \
+    +ipo.turn_cost=0.03 \
+    +ipo.enable_ablation=true \
     +ipo.efficiency_bonus=0.0 \
-    +ipo.baseline_reward=0.05 \
-    +ipo.clarify_bonus=0.20 \
+    +ipo.baseline_reward=0.03 \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.default_local_dir=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/$EXPERIMENT_NAME \
     2>&1 | tee $EXPERIMENT_NAME.log

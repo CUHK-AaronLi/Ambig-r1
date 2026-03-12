@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name="ipo-v6c-2g"
+#SBATCH --job-name="ipo-v6e-4g"
 #SBATCH --account=pgs
 #SBATCH --qos=low
 #SBATCH --partition=gemini
 #SBATCH -o out/%j-%x.out
 #SBATCH -e out/%j-%x.err
 #SBATCH --time=12:00:00
-#SBATCH --gpus=2
+#SBATCH --gpus=4
 #SBATCH --exclude=CPIIGPU-211-128
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -28,22 +28,21 @@ export DATA_DIR=scripts/data_process/data/ambignq_fewshot
 export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new/code/verl_checkpoints/sft-clarify-warmup/global_step_330
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_MODE=offline
-export EXPERIMENT_NAME=ipo-v6c-2gpu
+export EXPERIMENT_NAME=ipo-v6e-4gpu
 export AZURE_ENDPOINT="https://cpii-s5.openai.azure.com/"
 export AZURE_API_KEY="91e5ea9bf61c4769a44b0b0b5c67d559"
 export AZURE_DEPLOYMENT="gpt-4o"
 export AZURE_API_VERSION="2024-02-01"
 
-echo "===== IPO v6c: Strong bonus (clarify_bonus=0.20, turn_cost=0.00) ====="
-echo "Purpose: Maximum clarify incentive upper bound (diagnostic)"
+echo "===== IPO v6e 4-GPU: New simulator + alpha=0.5 (no bonus, pure IG) ====="
 
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/tinytest.parquet \
     data.train_data_num=null \
     data.val_data_num=100 \
-    data.train_batch_size=16 \
-    data.val_batch_size=16 \
+    data.train_batch_size=32 \
+    data.val_batch_size=32 \
     data.max_prompt_length=8192 \
     data.max_response_length=2048 \
     data.max_start_length=3072 \
@@ -56,17 +55,17 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.2 \
     actor_rollout_ref.actor.use_kl_loss=true \
-    actor_rollout_ref.actor.ppo_mini_batch_size=16 \
-    actor_rollout_ref.actor.ppo_micro_batch_size=2 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_micro_batch_size=8 \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=false \
     actor_rollout_ref.actor.fsdp_config.grad_offload=false \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=false \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size=8 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size=16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.35 \
-    actor_rollout_ref.ref.log_prob_micro_batch_size=8 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.kl_loss_coef=0.08 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -79,7 +78,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     trainer.logger=['console','wandb'] \
     +trainer.val_only=false \
     +trainer.val_before_train=true \
-    trainer.n_gpus_per_node=2 \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=50 \
     trainer.test_freq=20 \
@@ -87,7 +86,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     trainer.total_epochs=1 \
     trainer.total_training_steps=100 \
     trainer.default_hdfs_dir=null \
-    trainer.num_cpus=20 \
+    trainer.num_cpus=40 \
     max_turns=4 \
     +ambigqa.enable_clarify_action=true \
     +ambigqa.max_clarify_turns=3 \
@@ -96,12 +95,12 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     +ambigqa.azure_openai_api_key="91e5ea9bf61c4769a44b0b0b5c67d559" \
     +ambigqa.azure_openai_deployment="gpt-4o" \
     +ambigqa.enable_entropy=false \
-    +ipo.alpha=0.3 \
-    +ipo.turn_cost=0.00 \
+    +ipo.alpha=0.5 \
+    +ipo.turn_cost=0.05 \
     +ipo.enable_ablation=false \
     +ipo.efficiency_bonus=0.0 \
     +ipo.baseline_reward=0.05 \
-    +ipo.clarify_bonus=0.20 \
+    +ipo.clarify_bonus=0.0 \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.default_local_dir=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/$EXPERIMENT_NAME \
     2>&1 | tee $EXPERIMENT_NAME.log
