@@ -447,7 +447,7 @@ class LLMGenerationManager:
                 # 从rollings中提取extra_info，包含gold_question等信息
                 extra_data = self._prepare_clarify_metadata(rollings)
             next_obs, dones, valid_action, is_search, is_clarify = self.execute_predictions(
-                responses_str, self.tokenizer.pad_token, active_mask, extra_data=extra_data
+                responses_str, self.tokenizer.pad_token, active_mask, do_search=True, extra_data=extra_data
             )
             
             # 记录轨迹（已关闭落盘/追踪）
