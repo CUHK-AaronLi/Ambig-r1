@@ -118,42 +118,57 @@ class LLMGenerationManager:
         data_source_array = rollings.non_tensor_batch.get('data_source')
         reward_model_array = rollings.non_tensor_batch.get('reward_model', [])
 
+        def _parse_extra_info(item):
+            """Parse extra_info item: handles str (JSON), dict, and other types."""
+            if isinstance(item, dict):
+                return item
+            if isinstance(item, str):
+                try:
+                    parsed = json.loads(item)
+                    return parsed if isinstance(parsed, dict) else {}
+                except (json.JSONDecodeError, ValueError):
+                    return {}
+            if hasattr(item, 'item'):
+                try:
+                    result = item.item()
+                    return result if isinstance(result, dict) else {}
+                except Exception:
+                    return {}
+            return {}
+
         def _extract_extra(idx):
             if isinstance(extra_info_array, (list, tuple)):
-                return extra_info_array[idx] if idx < len(extra_info_array) else {}
+                item = extra_info_array[idx] if idx < len(extra_info_array) else {}
+                return _parse_extra_info(item)
             try:
                 import numpy as np
                 if isinstance(extra_info_array, np.ndarray):
                     if idx < len(extra_info_array):
-                        item = extra_info_array[idx]
-                        if isinstance(item, dict):
-                            return item
-                        if hasattr(item, 'item'):
-                            try:
-                                return item.item() or {}
-                            except Exception:
-                                return {}
-                        return item if isinstance(item, dict) else {}
+                        return _parse_extra_info(extra_info_array[idx])
             except ImportError:
                 pass
             if isinstance(extra_info_array, dict):
                 return extra_info_array
+            if isinstance(extra_info_array, str):
+                return _parse_extra_info(extra_info_array)
             return {}
 
         def _extract_reward_model(idx):
             """Extract reward_model dict for a given index."""
             if isinstance(reward_model_array, (list, tuple)):
-                return reward_model_array[idx] if idx < len(reward_model_array) else {}
+                item = reward_model_array[idx] if idx < len(reward_model_array) else {}
+                return _parse_extra_info(item)
             try:
                 import numpy as np
                 if isinstance(reward_model_array, np.ndarray):
                     if idx < len(reward_model_array):
-                        item = reward_model_array[idx]
-                        return item if isinstance(item, dict) else {}
+                        return _parse_extra_info(reward_model_array[idx])
             except ImportError:
                 pass
             if isinstance(reward_model_array, dict):
                 return reward_model_array
+            if isinstance(reward_model_array, str):
+                return _parse_extra_info(reward_model_array)
             return {}
 
         def _pick_value(source, idx):
@@ -344,6 +359,13 @@ class LLMGenerationManager:
             for i in range(min(1, total_samples)):  # 显示前3个样例的基本信息
                 if i < len(extra_info_array):
                     extra_info = extra_info_array[i]
+                    if isinstance(extra_info, str):
+                        try:
+                            extra_info = json.loads(extra_info)
+                        except (json.JSONDecodeError, ValueError):
+                            extra_info = {}
+                    if not isinstance(extra_info, dict):
+                        extra_info = {}
                     original_question = extra_info.get('original_question', 'N/A')
                     is_ambiguous = extra_info.get('_is_ambiguous', False)
                     print(f"📝 Sample {i}: {original_question[:50]}{'...' if len(original_question) > 50 else ''} (Ambiguous: {is_ambiguous})")
@@ -396,7 +418,14 @@ class LLMGenerationManager:
                 extra_info_array = rollings.non_tensor_batch.get('extra_info')
                 if extra_info_array is not None and trace_sample_idx < len(extra_info_array):
                     trace_extra_info = extra_info_array[trace_sample_idx]
-                
+                    if isinstance(trace_extra_info, str):
+                        try:
+                            trace_extra_info = json.loads(trace_extra_info)
+                        except (json.JSONDecodeError, ValueError):
+                            trace_extra_info = {}
+                    if not isinstance(trace_extra_info, dict):
+                        trace_extra_info = {}
+
                 trace_original_question = trace_extra_info.get('original_question', 'N/A')
                 trace_is_ambiguous = trace_extra_info.get('_is_ambiguous', False)
                 

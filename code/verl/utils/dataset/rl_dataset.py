@@ -26,6 +26,7 @@ from verl.utils.fs import copy_local_path_from_hdfs
 
 from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
+import json
 
 
 def collate_fn(data_list: list[dict]) -> dict:
@@ -149,7 +150,13 @@ class RLHFDataset(Dataset):
             row_dict['raw_prompt'] = chat.tolist()
 
         # add index for each prompt
-        index = row_dict.get("extra_info", {}).get("index", 0)
+        extra_info = row_dict.get("extra_info", {})
+        if isinstance(extra_info, str):
+            try:
+                extra_info = json.loads(extra_info)
+            except (json.JSONDecodeError, ValueError):
+                extra_info = {}
+        index = extra_info.get("index", 0) if isinstance(extra_info, dict) else 0
         row_dict["index"] = index
 
         return row_dict
