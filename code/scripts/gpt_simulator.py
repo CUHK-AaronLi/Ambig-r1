@@ -85,23 +85,50 @@ def create_simulation_prompt(query: ClarifyQuery) -> str:
     """
     Create prompt for simulating user responses.
 
-    v2: Rewritten to produce natural, informative user responses.
-    Key changes from v1:
-    - Removed "reference example" language (was leaking into responses)
-    - Removed ACTION format requirement (was polluting training data)
-    - Natural user persona instead of agent instructions
-    - Explicit requirement for disambiguating information (not just yes/no)
-    - Handles identical ambiguous/unambiguous questions gracefully
+    v3: Dataset-aware branching for better simulator quality.
+    Changes from v2:
+    - PACIFIC-specific prompt uses table/document context (no unambiguous_question available)
+    - Generic non-ambiguous prompt unchanged
+    - Ambiguous prompt unchanged
+    - answer_hints are NEVER included in any prompt (leakage prevention)
     """
     ambig_q = query.question.strip()
     unambig_q = (query.unambiguous_question or query.reference_question or "").strip()
     clarif_q = query.clarification_question.strip()
     context_block = query.context.strip()
+    data_source = (query.data_source or "generic").strip().lower()
 
     # Check if the question is actually ambiguous
     is_same_question = (ambig_q.lower().rstrip('?').strip() == unambig_q.lower().rstrip('?').strip())
 
-    if is_same_question or not unambig_q:
+    if data_source == "pacific" and (is_same_question or not unambig_q):
+        # PACIFIC: financial table QA with conversation history.
+        # No unambiguous_question available — use document context to guide response.
+        context_section = f"\nDocument you are referencing:\n{context_block}" if context_block else ""
+        prompt = f"""You are a user who asked a question about a financial document:
+"{ambig_q}"
+
+An AI assistant is trying to help and asked:
+"{clarif_q}"
+{context_section}
+
+Respond naturally as a real user would. Keep your response under 50 words.
+
+Guidelines:
+- You may specify WHICH part of the data you mean (e.g., which row, time period, or metric)
+- You do NOT know the answer — never provide numerical results or computed values
+- If the assistant asks for the answer itself, say "I don't know, that's why I'm asking"
+- Only answer what is directly asked — do not volunteer extra information
+- Do NOT use meta-language ("table", "document", "context") — speak conversationally
+
+Examples:
+- "I'm asking about the 2019 figures, not 2020."
+- "Yes, I mean the net revenue, not gross."
+- "I don't know the exact number — that's what I'm asking.\""""
+        # Context already embedded, skip appending later
+        return prompt
+
+    elif is_same_question or not unambig_q:
         # Non-ambiguous case: the user's question is already clear
         prompt = f"""You are a user who asked the following question:
 "{ambig_q}"
@@ -238,7 +265,7 @@ def simulate_user_response(query: ClarifyQuery, max_retries: int = 1) -> str:
     # 输入验证
     if not query.question or not query.clarification_question:
         logger.warning("Missing required parameters: question or clarification_question")
-        return "I need more information to answer this question."
+        return "[System] Unable to process clarification."
 
     prompt = create_simulation_prompt(query)
 
@@ -261,7 +288,7 @@ def simulate_user_response(query: ClarifyQuery, max_retries: int = 1) -> str:
                     }
                 ],
                 max_tokens=150,
-                temperature=0.7,
+                temperature=0.3,
             )
 
             response = completion.choices[0].message.content.strip()
@@ -295,15 +322,15 @@ def simulate_user_response(query: ClarifyQuery, max_retries: int = 1) -> str:
                 # 如果是配置问题，给出提示
                 if "YOUR ENDPOINT" in AZURE_ENDPOINT or "YOUR API KEY" in AZURE_API_KEY:
                     logger.error("⚠️  Configuration issue detected: AZURE_ENDPOINT or AZURE_API_KEY may not be set correctly!")
-                return "I need more information to answer this question."
+                return "[System] Unable to process clarification."
 
         except APITimeoutError as e:
             logger.error(f"Timeout error: {type(e).__name__}: {e}")
-            return "I need more information to answer this question."
+            return "[System] Unable to process clarification."
 
         except RateLimitError as e:
             logger.error(f"Rate limit error: {type(e).__name__}: {e}")
-            return "I need more information to answer this question."
+            return "[System] Unable to process clarification."
 
         except Exception as e:
             # 记录详细的异常信息，帮助诊断问题
@@ -319,7 +346,7 @@ def simulate_user_response(query: ClarifyQuery, max_retries: int = 1) -> str:
                 logger.error("⚠️  Configuration issue detected: AZURE_ENDPOINT or AZURE_API_KEY may not be set correctly!")
 
             # 其他错误直接返回，不重试
-            return "I need more information to answer this question."
+            return "[System] Unable to process clarification."
 
     return "I need more information to answer this question."
 
@@ -377,7 +404,7 @@ def generate_batch_response(request: BatchQueryRequest):
             if not query.clarification_question:
                 logger.warning(f"Skipping invalid query (missing clarification_question): {query}")
                 results.append({
-                    "response": "I need more information to answer this question.",
+                    "response": "[System] Unable to process clarification.",
                     "question": query.question,
                     "clarification_question": "",
                     "context": query.context,
