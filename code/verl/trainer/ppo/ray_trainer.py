@@ -480,9 +480,11 @@ class RayPPOTrainer(object):
 
         clarify_url = None
         enable_clarify = False
+        enable_search = True
         if hasattr(self.config, 'ambigqa'):
             clarify_url = getattr(self.config.ambigqa, 'gpt4_simulator_url', None)
             enable_clarify = bool(getattr(self.config.ambigqa, 'enable_clarify_action', False))
+            enable_search = bool(getattr(self.config.ambigqa, 'enable_search_action', True))
 
         gen_config = GenerationConfig(
             max_turns=self.config.max_turns,
@@ -496,6 +498,7 @@ class RayPPOTrainer(object):
             topk=self.config.retriever.topk,
             clarify_url=clarify_url,
             enable_clarify=enable_clarify,
+            enable_search=enable_search,
         )
 
         # Agent config preparation
@@ -797,9 +800,11 @@ class RayPPOTrainer(object):
         # Agent config preparation
         clarify_url = None
         enable_clarify = False
+        enable_search = True
         if hasattr(self.config, 'ambigqa'):
             clarify_url = getattr(self.config.ambigqa, 'gpt4_simulator_url', None)
             enable_clarify = bool(getattr(self.config.ambigqa, 'enable_clarify_action', False))
+            enable_search = bool(getattr(self.config.ambigqa, 'enable_search_action', True))
 
         gen_config = GenerationConfig(
             max_turns=self.config.max_turns,
@@ -813,6 +818,7 @@ class RayPPOTrainer(object):
             topk=self.config.retriever.topk,
             clarify_url=clarify_url,
             enable_clarify=enable_clarify,
+            enable_search=enable_search,
         )
 
         generation_manager = LLMGenerationManager(

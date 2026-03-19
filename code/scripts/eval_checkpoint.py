@@ -105,6 +105,8 @@ def _extract_references(gt) -> list:
 # ---------------------------------------------------------------------------
 def load_eval_data(data_path: str, max_samples: int = None):
     """Load parquet data and return list of (prompt_text, ground_truth) pairs."""
+    import numpy as np
+
     df = pd.read_parquet(data_path)
     print(f"Loaded {len(df)} samples from {data_path}")
     print(f"Columns: {list(df.columns)}")
@@ -122,14 +124,29 @@ def load_eval_data(data_path: str, max_samples: int = None):
 
         gt = extra_info.get('reward_model', {}).get('ground_truth', None)
         if gt is None:
-            gt = row.get('reward_model', {}).get('ground_truth', None) if isinstance(row.get('reward_model'), dict) else None
+            rm = row.get('reward_model', {})
+            if isinstance(rm, dict):
+                gt = rm.get('ground_truth', None)
 
-        # The prompt is already tokenized in parquet; we need the raw text
-        # For now, we'll build prompts from the question field
-        question = extra_info.get('question', row.get('question', ''))
+        # Try to get question text from multiple sources
+        question = extra_info.get('question', '')
+        if not question:
+            question = extra_info.get('original_question', '')
+
+        # Extract pre-formatted chat messages from prompt column if available
+        # The prompt column stores chat messages as numpy array of dicts
+        chat_messages = None
+        prompt_col = row.get('prompt', None)
+        if prompt_col is not None:
+            if isinstance(prompt_col, np.ndarray):
+                prompt_col = prompt_col.tolist()
+            if isinstance(prompt_col, list) and len(prompt_col) > 0:
+                if isinstance(prompt_col[0], dict) and 'content' in prompt_col[0]:
+                    chat_messages = prompt_col
 
         samples.append({
             'question': question,
+            'chat_messages': chat_messages,
             'ground_truth': gt,
             'extra_info': extra_info,
         })
@@ -159,20 +176,40 @@ def generate_responses(model_path: str, samples: list, max_new_tokens: int = 204
         gpu_memory_utilization=0.85,
     )
 
-    # Build prompts using chat template
+    # Build prompts using chat template, tracking which have valid prompts
     prompts = []
-    for s in samples:
-        q = s['question']
-        if not q:
-            prompts.append("")
-            continue
+    valid_indices = []
+    for i, s in enumerate(samples):
+        prompt = None
 
-        messages = [{"role": "user", "content": q}]
-        try:
-            prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        except Exception:
-            prompt = q
-        prompts.append(prompt)
+        # Priority 1: Use pre-formatted chat messages from parquet
+        if s.get('chat_messages'):
+            try:
+                prompt = tokenizer.apply_chat_template(
+                    s['chat_messages'], tokenize=False, add_generation_prompt=True
+                )
+            except Exception:
+                # Fallback: extract content directly
+                prompt = s['chat_messages'][0].get('content', '')
+
+        # Priority 2: Build from question text
+        if not prompt or not prompt.strip():
+            q = s.get('question', '')
+            if q:
+                try:
+                    prompt = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": q}],
+                        tokenize=False, add_generation_prompt=True
+                    )
+                except Exception:
+                    prompt = q
+
+        if prompt and prompt.strip():
+            prompts.append(prompt)
+            valid_indices.append(i)
+
+    if len(valid_indices) < len(samples):
+        print(f"WARNING: {len(samples) - len(valid_indices)} samples had empty prompts, skipped")
 
     params = SamplingParams(
         temperature=0.0,  # greedy
@@ -183,13 +220,17 @@ def generate_responses(model_path: str, samples: list, max_new_tokens: int = 204
     print(f"Generating {len(prompts)} responses...")
     outputs = llm.generate(prompts, params)
 
-    responses = []
+    # Map outputs back to full sample list (empty string for skipped samples)
+    raw_responses = []
     for out in outputs:
         text = out.outputs[0].text
-        # If stopped at </answer>, add the closing tag back
         if not text.endswith("</answer>") and "<answer>" in text:
             text += "</answer>"
-        responses.append(text)
+        raw_responses.append(text)
+
+    responses = [""] * len(samples)
+    for idx, resp in zip(valid_indices, raw_responses):
+        responses[idx] = resp
 
     return responses
 

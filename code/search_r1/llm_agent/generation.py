@@ -26,6 +26,7 @@ class GenerationConfig:
     # 澄清相关配置（已取消检索）
     clarify_url: str = "http://127.0.0.1:8001/batch_generate"
     enable_clarify: bool = True
+    enable_search: bool = True  # Set False to make search actions invalid (for PACIFIC/Abg-CoQA)
 
 class LLMGenerationManager:
     def __init__(
@@ -737,15 +738,27 @@ class LLMGenerationManager:
                     is_search.append(0)
                     is_clarify.append(0)
                 elif action == 'search':
-                    if i in search_results_map:
+                    if not self.config.enable_search:
+                        # Search disabled — treat as invalid action
+                        next_obs.append(f'\nSearch is not available for this task. '
+                            'Use <clarify> to ask clarifying questions or <answer> to give your final answer.\n')
+                        dones.append(0)
+                        valid_action.append(0)
+                        is_search.append(0)
+                        is_clarify.append(0)
+                    elif i in search_results_map:
                         obs_text = search_results_map[i]
                         next_obs.append(f'\n\n<information>{obs_text}</information>\n\n')
+                        dones.append(0)
+                        valid_action.append(1)
+                        is_search.append(1)
+                        is_clarify.append(0)
                     else:
                         next_obs.append(f'\n\n<information>Search service not available.</information>\n\n')
-                    dones.append(0)
-                    valid_action.append(1)
-                    is_search.append(1)
-                    is_clarify.append(0)
+                        dones.append(0)
+                        valid_action.append(1)
+                        is_search.append(1)
+                        is_clarify.append(0)
                 elif action == 'clarify':
                     if self.config.enable_clarify and clarify_results:
                         clarify_result = clarify_results.pop(0)

@@ -32,13 +32,13 @@ echo "Model: $SFT_MODEL"
 echo "Purpose: Table 1 'Before RL' baseline row"
 echo ""
 
-# Dataset paths
+# Dataset paths (matched to v8 training val files for consistency)
 declare -A DATASETS
 DATASETS[pacific]=scripts/data_process/data/pacific_fewshot/validation.parquet
-DATASETS[abgcoqa]=scripts/data_process/data/abgcoqa/validation.parquet
-DATASETS[sharc]=scripts/data_process/data/sharc_fewshot/validation.parquet
-DATASETS[situatedqa]=scripts/data_process/data/situatedqa_fewshot/validation.parquet
-DATASETS[ambignq]=scripts/data_process/data/ambignq_fewshot/validation.parquet
+DATASETS[abgcoqa]=scripts/data_process/data/abgcoqa/val.parquet
+DATASETS[sharc]=scripts/data_process/data/sharc_fewshot/tinytest.parquet
+DATASETS[situatedqa]=scripts/data_process/data/situatedqa_fewshot/tinytest.parquet
+DATASETS[ambignq]=scripts/data_process/data/ambignq_fewshot/tinytest.parquet
 
 for dataset in pacific abgcoqa sharc situatedqa ambignq; do
     data_path=${DATASETS[$dataset]}

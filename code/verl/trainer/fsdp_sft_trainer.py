@@ -356,7 +356,10 @@ class FSDPSFTTrainer(object):
         self.total_training_steps = total_training_steps
         print(f'Total training steps: {self.total_training_steps}')
 
-        # TODO (zhangchi.usc1992) add back checkpoint manager. Currently, it blocks when uploading to hdfs. So very slow.
+        # save_freq: save checkpoint every N steps (0 = only at epoch boundaries)
+        save_freq = getattr(self.config.trainer, 'save_freq', 0)
+        if save_freq > 0:
+            print(f'Will save checkpoint every {save_freq} steps (in addition to epoch boundaries)')
 
         if self.config.trainer.validate_before_training:
             # validate before training
@@ -379,6 +382,23 @@ class FSDPSFTTrainer(object):
                 if rank == 0:
                     tracking.log(data=metric, step=global_step)
                 global_step += 1
+
+                # Intermediate checkpoint saving
+                if save_freq > 0 and global_step % save_freq == 0:
+                    print(f'Saving intermediate checkpoint at step {global_step}')
+                    self.save_checkpoint(step=global_step)
+                    # Also run validation at intermediate saves
+                    val_losses_mid = []
+                    for val_data_mid in self.val_dataloader:
+                        val_data_mid = TensorDict(val_data_mid, batch_size=self.config.data.micro_batch_size).cuda()
+                        val_loss_mid = self.validation_step(val_data_mid)
+                        val_losses_mid.append(val_loss_mid)
+                    if rank == 0:
+                        avg_val_loss_mid = torch.mean(torch.stack(val_losses_mid))
+                        mid_metric = {'val/loss': avg_val_loss_mid.detach().item()}
+                        tracking.log(data=mid_metric, step=global_step)
+                        print(f'  Step {global_step} val/loss: {avg_val_loss_mid.detach().item():.4f}')
+                    torch.distributed.barrier()
 
                 # for early exit validation
                 if global_step >= self.total_training_steps:
