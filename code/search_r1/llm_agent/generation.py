@@ -191,8 +191,27 @@ class LLMGenerationManager:
             data_source = _pick_value(data_source_array, i) or sample_extra.get('data_source') or 'generic'
 
             ambig_q = sample_extra.get('original_question') or sample_extra.get('gold_question') or ""
-            unambig_q = sample_extra.get('gold_question') or sample_extra.get('unambiguous_question') or ambig_q
-            clarify_context = sample_extra.get('clarify_context') or sample_extra.get('user_simulator_context', '')
+            unambig_q = (sample_extra.get('gold_question')
+                         or sample_extra.get('unambiguous_question')
+                         or sample_extra.get('disambiguated_question')
+                         or ambig_q)
+            # Map multiple context field names across datasets:
+            #   Abg-CoQA: user_simulator_context, ShARC: snippet+scenario
+            clarify_context = (sample_extra.get('clarify_context')
+                               or sample_extra.get('user_simulator_context')
+                               or sample_extra.get('context')
+                               or '')
+            # ShARC: combine snippet + scenario if no context found
+            if not clarify_context:
+                snippet = sample_extra.get('snippet', '')
+                scenario = sample_extra.get('scenario', '')
+                if snippet or scenario:
+                    parts = []
+                    if snippet:
+                        parts.append(f"Rule: {snippet}")
+                    if scenario:
+                        parts.append(f"Scenario: {scenario}")
+                    clarify_context = ' '.join(parts)
 
             # Extract golden answers for answer leakage detection
             answer_hints = []
@@ -385,6 +404,10 @@ class LLMGenerationManager:
         # 初始化轨迹记录（当前关闭落盘）
         trajectories = None
 
+        # AReW critique tracker (always-on, near-zero overhead)
+        from verl.trainer.ppo.arew_critique import init_critique_tracker, accumulate_step_critiques, finalize_critiques
+        arew_tracker = init_critique_tracker(gen_batch.batch['input_ids'].shape[0])
+
         # Main generation loop
         for step in range(self.config.max_turns):
             if not active_mask.sum():
@@ -491,6 +514,9 @@ class LLMGenerationManager:
             valid_action_stats += torch.tensor(valid_action, dtype=torch.int)
             valid_clarify_stats += torch.tensor(is_clarify, dtype=torch.int)
 
+            # AReW: accumulate step-level critique signals
+            arew_tracker = accumulate_step_critiques(arew_tracker, next_obs, is_search, is_clarify, active_mask)
+
             next_obs_ids = self._process_next_obs(next_obs)
             
             # Update states
@@ -555,7 +581,6 @@ class LLMGenerationManager:
             active_num_list.append(active_mask.sum().item())
             valid_action_stats += torch.tensor(valid_action, dtype=torch.int)
             valid_clarify_stats += torch.tensor(is_clarify, dtype=torch.int)
-            
 
             original_right_side = self._update_right_side(
                 original_right_side,
@@ -568,6 +593,7 @@ class LLMGenerationManager:
         meta_info['active_mask'] = active_mask.tolist()
         meta_info['valid_action_stats'] = valid_action_stats.tolist()
         meta_info['valid_clarify_stats'] = valid_clarify_stats.tolist()
+        meta_info['arew_critiques'] = finalize_critiques(arew_tracker)
         
         # 显示所有样例的最终统计总结
         print(f"\n{'='*80}")

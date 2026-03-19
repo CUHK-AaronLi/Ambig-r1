@@ -967,6 +967,12 @@ class RayPPOTrainer(object):
                                                   lam=self.config.algorithm.lam,
                                                   num_repeat=self.config.actor_rollout_ref.rollout.n)
 
+                        # AReW critique: optionally modify advantages with step-level critique signals
+                        if hasattr(self.config, 'arew') and getattr(self.config.arew, 'enable', False):
+                            from verl.trainer.ppo.arew_critique import apply_arew_critique
+                            arew_metrics = apply_arew_critique(batch, self.config.arew)
+                            metrics.update(arew_metrics)
+
                     # update critic
                     if self.use_critic:
                         with _timer('update_critic', timing_raw):
