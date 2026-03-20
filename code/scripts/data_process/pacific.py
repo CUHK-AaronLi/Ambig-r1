@@ -157,6 +157,10 @@ def convert_split(raw_data: List[Dict[str, Any]], split: str, template_type: str
                     "follow_up": q.get("follow_up", False),
                     "rel_paragraphs": q.get("rel_paragraphs", []),
                     "original_question": q.get("original_question", question_text),
+                    "data_source": data_source,
+                    # Simulator context: table structure helps GPT-4o generate
+                    # meaningful clarification responses
+                    "clarify_context": context,
                 },
             }
 
