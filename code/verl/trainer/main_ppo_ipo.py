@@ -44,13 +44,15 @@ class IPORewardManager(BaseRewardManager):
                  alpha=DEFAULT_ALPHA, turn_cost=0.0,
                  efficiency_bonus=EFFICIENCY_BONUS,
                  baseline_reward=BASELINE_REWARD,
-                 clarify_bonus=0.0):
+                 clarify_bonus=0.0,
+                 counterfactual_logprob=False):
         super().__init__(tokenizer, num_examine, format_score, n_agent)
         self.alpha = alpha
         self.turn_cost = turn_cost
         self.efficiency_bonus = efficiency_bonus
         self.baseline_reward = baseline_reward
         self.clarify_bonus = clarify_bonus
+        self.counterfactual_logprob = counterfactual_logprob
 
     def __call__(self, data: DataProto):
         if 'rm_scores' in data.batch.keys():
@@ -62,9 +64,14 @@ class IPORewardManager(BaseRewardManager):
         has_log_probs = 'old_log_probs' in data.batch.keys()
         already_print_data_sources = {}
 
+        # Check for counterfactual logprob IG scores from ray_trainer
+        counterfactual_ig_scores = data.non_tensor_batch.get('counterfactual_ig_scores', None)
+        use_counterfactual = counterfactual_ig_scores is not None and self.counterfactual_logprob
+        counterfactual_count = 0
+
         # Check for ablation scores from ray_trainer
         ablation_scores = data.non_tensor_batch.get('ablation_scores', None)
-        use_ablation = ablation_scores is not None
+        use_ablation = ablation_scores is not None and not use_counterfactual  # counterfactual takes priority
         ablation_used_count = 0
         fallback_count = 0
 
@@ -104,59 +111,82 @@ class IPORewardManager(BaseRewardManager):
             ig_source = "none"
 
             if n_intermediate > 0:
-                # Try ablation scores first
-                sample_ablation = None
-                if use_ablation and ablation_scores[i] is not None:
-                    sample_ablation = ablation_scores[i]  # list of (turn_type, delta)
-
-                if sample_ablation is not None and len(sample_ablation) > 0:
-                    # ---- Ablation-based IG (v3 counterfactual) ----
-                    ig_source = "ablation"
-                    ablation_used_count += 1
-                    for turn_type, delta in sample_ablation:
-                        # Outcome-gated, non-negative
-                        ig_reward = self.alpha * max(delta, 0.0) * f1
-                        # Floor at baseline
-                        ig_reward = max(ig_reward, self.baseline_reward)
-                        # Clarify bonus: extra incentive for clarify actions
-                        if turn_type == 'clarify' and self.clarify_bonus > 0:
-                            ig_reward += self.clarify_bonus
-
-                        ig_details.append({
-                            'type': turn_type,
-                            'delta': delta,
-                            'reward': ig_reward,
-                        })
-                        ig_total += ig_reward
-                else:
-                    # ---- Fallback: text-overlap proxy (v2 style) ----
-                    ig_source = "fallback"
-                    fallback_count += 1
-                    cumulative_obs = ""
-                    prev_confidence = 0.0
+                # Priority: counterfactual logprob > ablation > fallback
+                if use_counterfactual and counterfactual_ig_scores[i] is not None:
+                    # ---- Counterfactual logprob IG (true counterfactual) ----
+                    ig_source = "counterfactual"
+                    counterfactual_count += 1
+                    total_ig = float(counterfactual_ig_scores[i])
+                    # Clamp IG to reasonable range (can be negative = tool hurt)
+                    total_ig = max(min(total_ig, 2.0), -1.0)
+                    per_turn_ig = total_ig / n_intermediate
 
                     for turn in intermediate_turns:
-                        obs = turn['observation']
-                        individual_relevance = self._max_f1(obs, references) if obs else 0.0
-
-                        cumulative_obs += " " + obs if obs else ""
-                        curr_confidence = self._max_f1(cumulative_obs.strip(), references) if cumulative_obs.strip() else 0.0
-                        marginal_gain = max(curr_confidence - prev_confidence, 0.0)
-                        prev_confidence = curr_confidence
-
-                        ig_raw = max(individual_relevance, marginal_gain)
-                        ig_reward = self.alpha * ig_raw * f1
-                        ig_reward = max(ig_reward, self.baseline_reward)
-                        # Clarify bonus: extra incentive for clarify actions
+                        # Scale by alpha, NO F1 gating (logprob already captures answer quality)
+                        ig_reward = self.alpha * per_turn_ig
+                        # Floor at negative cap (don't penalize too harshly)
+                        ig_reward = max(ig_reward, -0.2)
                         if turn['type'] == 'clarify' and self.clarify_bonus > 0:
                             ig_reward += self.clarify_bonus
-
                         ig_details.append({
                             'type': turn['type'],
-                            'delta': ig_raw,
+                            'delta': per_turn_ig,
                             'reward': ig_reward,
                         })
                         ig_total += ig_reward
+
+                else:
+                    # Try ablation scores first
+                    sample_ablation = None
+                    if use_ablation and ablation_scores[i] is not None:
+                        sample_ablation = ablation_scores[i]  # list of (turn_type, delta)
+
+                    if sample_ablation is not None and len(sample_ablation) > 0:
+                        # ---- Ablation-based IG (v3 counterfactual) ----
+                        ig_source = "ablation"
+                        ablation_used_count += 1
+                        for turn_type, delta in sample_ablation:
+                            # Outcome-gated, non-negative
+                            ig_reward = self.alpha * max(delta, 0.0) * f1
+                            # Floor at baseline
+                            ig_reward = max(ig_reward, self.baseline_reward)
+                            if turn_type == 'clarify' and self.clarify_bonus > 0:
+                                ig_reward += self.clarify_bonus
+
+                            ig_details.append({
+                                'type': turn_type,
+                                'delta': delta,
+                                'reward': ig_reward,
+                            })
+                            ig_total += ig_reward
+                    else:
+                        # ---- Fallback: text-overlap proxy (v2 style) ----
+                        ig_source = "fallback"
+                        fallback_count += 1
+                        cumulative_obs = ""
+                        prev_confidence = 0.0
+
+                        for turn in intermediate_turns:
+                            obs = turn['observation']
+                            individual_relevance = self._max_f1(obs, references) if obs else 0.0
+
+                            cumulative_obs += " " + obs if obs else ""
+                            curr_confidence = self._max_f1(cumulative_obs.strip(), references) if cumulative_obs.strip() else 0.0
+                            marginal_gain = max(curr_confidence - prev_confidence, 0.0)
+                            prev_confidence = curr_confidence
+
+                            ig_raw = max(individual_relevance, marginal_gain)
+                            ig_reward = self.alpha * ig_raw * f1
+                            ig_reward = max(ig_reward, self.baseline_reward)
+                            if turn['type'] == 'clarify' and self.clarify_bonus > 0:
+                                ig_reward += self.clarify_bonus
+
+                            ig_details.append({
+                                'type': turn['type'],
+                                'delta': ig_raw,
+                                'reward': ig_reward,
+                            })
+                            ig_total += ig_reward
 
                 # Cap total IG
                 if ig_total > MAX_IG_PER_SAMPLE:
@@ -226,7 +256,10 @@ class IPORewardManager(BaseRewardManager):
                     f"| {response_str[:200]}"
                 )
 
-        if use_ablation:
+        if use_counterfactual:
+            print(f"[IPOv3] Counterfactual logprob stats: {counterfactual_count} scored, "
+                  f"{batch_size - counterfactual_count} no-turns/no-score")
+        elif use_ablation:
             print(f"[IPOv3] Ablation stats: {ablation_used_count} ablation, {fallback_count} fallback, "
                   f"{batch_size - ablation_used_count - fallback_count} no-turns")
 
@@ -391,6 +424,7 @@ def main_task(config):
     efficiency_bonus = EFFICIENCY_BONUS
     baseline_reward = BASELINE_REWARD
     clarify_bonus = 0.0
+    counterfactual_logprob = False
     if hasattr(config, 'ipo'):
         if hasattr(config.ipo, 'alpha'):
             alpha = config.ipo.alpha
@@ -402,19 +436,24 @@ def main_task(config):
             baseline_reward = config.ipo.baseline_reward
         if hasattr(config.ipo, 'clarify_bonus'):
             clarify_bonus = config.ipo.clarify_bonus
+        if hasattr(config.ipo, 'counterfactual_logprob'):
+            counterfactual_logprob = config.ipo.counterfactual_logprob
     print(f"[IPO] alpha={alpha}, turn_cost={turn_cost}, efficiency_bonus={efficiency_bonus}, "
-          f"baseline_reward={baseline_reward}, clarify_bonus={clarify_bonus}, n_agent={n_agent}")
+          f"baseline_reward={baseline_reward}, clarify_bonus={clarify_bonus}, "
+          f"counterfactual_logprob={counterfactual_logprob}, n_agent={n_agent}")
 
     log_main("Creating IPO reward manager")
     reward_fn = IPORewardManager(
         tokenizer=tokenizer, num_examine=1, n_agent=n_agent, alpha=alpha,
         turn_cost=turn_cost, efficiency_bonus=efficiency_bonus,
         baseline_reward=baseline_reward, clarify_bonus=clarify_bonus,
+        counterfactual_logprob=counterfactual_logprob,
     )
     val_reward_fn = IPORewardManager(
         tokenizer=tokenizer, num_examine=2, n_agent=1, alpha=alpha,
         turn_cost=turn_cost, efficiency_bonus=efficiency_bonus,
         baseline_reward=baseline_reward, clarify_bonus=clarify_bonus,
+        counterfactual_logprob=False,  # validation uses standard reward
     )
 
     log_main("Creating resource pool manager")

@@ -929,8 +929,18 @@ class RayPPOTrainer(object):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
 
+                    # ---- Counterfactual logprob IG for IPO ----
+                    if getattr(self.config, 'ipo', None) and getattr(self.config.ipo, 'counterfactual_logprob', False):
+                        if self.use_reference_policy:
+                            with _timer('counterfactual_ig', timing_raw):
+                                from verl.trainer.counterfactual_ig import compute_counterfactual_logprobs
+                                cf_scores = compute_counterfactual_logprobs(self, batch)
+                                batch.non_tensor_batch['counterfactual_ig_scores'] = cf_scores
+                        else:
+                            print("[Counterfactual-IG] WARNING: counterfactual_logprob=true but no ref policy, skipping")
+
                     # ---- Ablation scoring for IPO v3 ----
-                    if getattr(self.config, 'ipo', None) and getattr(self.config.ipo, 'enable_ablation', False):
+                    elif getattr(self.config, 'ipo', None) and getattr(self.config.ipo, 'enable_ablation', False):
                         if self.use_reference_policy:
                             with _timer('ablation', timing_raw):
                                 ablation_scores = self._compute_ablation_scores(batch)
