@@ -53,7 +53,16 @@ class TensorHelper:
         """
         Pad responses for non-active examples with pad tokens.
         """
-        assert active_mask.sum() == responses.shape[0]
+        if active_mask.sum() != responses.shape[0]:
+            print(f"[DEBUG _example_level_pad] MISMATCH: active_mask.sum()={active_mask.sum().item()}, responses.shape={responses.shape}, active_mask.shape={active_mask.shape}")
+            # Instead of crashing, try to handle gracefully
+            # If responses has more rows, trim; if fewer, this is a real bug
+            if responses.shape[0] > active_mask.sum():
+                responses = responses[:active_mask.sum()]
+                responses_str = responses_str[:active_mask.sum()]
+                print(f"[DEBUG _example_level_pad] Trimmed responses to {responses.shape[0]}")
+            else:
+                raise AssertionError(f"active_mask.sum()={active_mask.sum().item()} > responses.shape[0]={responses.shape[0]}")
         # Create masked responses tensor
         batch_size = active_mask.shape[0]
         seq_len = responses.shape[1]

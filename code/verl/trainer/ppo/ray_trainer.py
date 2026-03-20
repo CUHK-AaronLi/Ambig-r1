@@ -558,6 +558,7 @@ class RayPPOTrainer(object):
                     'do_sample': False,
                     'validate': True,
                 }
+                print(f"[DEBUG _validate] val batch shape: {test_gen_batch.batch['input_ids'].shape}")
                 with _timer('step', timing_raw):
                     first_input_ids = test_gen_batch.batch['input_ids'][:, -gen_config.max_start_length:].clone()
                     with _timer('gen', timing_raw):

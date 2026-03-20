@@ -327,11 +327,14 @@ class LLMGenerationManager:
             
         batch_size = active_batch.batch['input_ids'].shape[0]
         remainder = batch_size % num_gpus
-        
+
         for key in active_batch.batch.keys():
             active_batch.batch[key] = active_batch.batch[key].long()
         if remainder == 0:
-            return self.actor_rollout_wg.generate_sequences(active_batch)
+            output = self.actor_rollout_wg.generate_sequences(active_batch)
+            out_bs = output.batch['responses'].shape[0] if 'responses' in output.batch else 'N/A'
+            print(f"[DEBUG _generate_with_gpu_padding] no-pad: input_bs={batch_size}, output_bs={out_bs}")
+            return output
         
         # Add padding sequences
         padding_size = num_gpus - remainder
@@ -363,6 +366,8 @@ class LLMGenerationManager:
             padded_output.meta_info = trimmed_meta
             
         padded_output.batch = trimmed_batch
+        out_bs = trimmed_batch['responses'].shape[0] if 'responses' in trimmed_batch else 'N/A'
+        print(f"[DEBUG _generate_with_gpu_padding] padded: input_bs={batch_size}, padded_bs={batch_size + padding_size}, trimmed_bs={out_bs}")
         return padded_output
 
     def run_llm_loop(self, gen_batch, initial_input_ids: torch.Tensor) -> Tuple[Dict, Dict]:
@@ -421,6 +426,7 @@ class LLMGenerationManager:
             rollings_active = DataProto.from_dict({
                 k: v[active_mask] for k, v in rollings.batch.items()
             })
+            rollings_active.meta_info.update(rollings.meta_info)
             # 为 GPU padding 生成过程保留 non_tensor_batch（但实际生成不需要它们）
             gen_output = self._generate_with_gpu_padding(rollings_active)
 
@@ -545,6 +551,7 @@ class LLMGenerationManager:
             rollings_active = DataProto.from_dict({
                 k: v[active_mask] for k, v in rollings.batch.items()
             })
+            rollings_active.meta_info.update(rollings.meta_info)
             # 为 GPU padding 生成过程保留 non_tensor_batch（但实际生成不需要它们）
             gen_output = self._generate_with_gpu_padding(rollings_active)
 
