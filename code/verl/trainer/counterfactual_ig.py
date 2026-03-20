@@ -174,7 +174,7 @@ def compute_counterfactual_logprobs(trainer, batch: DataProto) -> np.ndarray:
             'position_ids': position_ids[mb_start:mb_end],
             'responses': responses[mb_start:mb_end],
         })
-        mb_data.meta_info['micro_batch_size'] = min(8, mb_size)
+        mb_data.meta_info['micro_batch_size'] = min(4, mb_size)
         mb_data.meta_info['temperature'] = 1.0
 
         ref_output = trainer.ref_policy_wg.compute_ref_log_prob(mb_data)
