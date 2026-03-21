@@ -122,8 +122,8 @@ class IPORewardManager(BaseRewardManager):
                     per_turn_ig = total_ig / n_intermediate
 
                     for turn in intermediate_turns:
-                        # Scale by alpha, NO F1 gating (logprob already captures answer quality)
-                        ig_reward = self.alpha * per_turn_ig
+                        # Scale by alpha, with F1 gating (same as ablation path)
+                        ig_reward = self.alpha * per_turn_ig * f1
                         # Floor at negative cap (don't penalize too harshly)
                         ig_reward = max(ig_reward, -0.2)
                         if turn['type'] == 'clarify' and self.clarify_bonus > 0:
