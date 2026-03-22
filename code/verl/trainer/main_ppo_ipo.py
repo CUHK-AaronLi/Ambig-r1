@@ -150,10 +150,12 @@ class IPORewardManager(BaseRewardManager):
                         ig_source = "ablation"
                         ablation_used_count += 1
                         for turn_type, delta in sample_ablation:
-                            # Outcome-gated, non-negative
-                            ig_reward = self.alpha * max(delta, 0.0) * f1
-                            # Floor at baseline
-                            ig_reward = max(ig_reward, self.baseline_reward)
+                            # Outcome-gated, allow negative delta for harmful turns
+                            clamped_delta = max(delta, -0.5)  # P0: allow negative IG
+                            f1_effective = max(f1, 0.1)       # P0: F1 floor for hard cases
+                            ig_reward = self.alpha * clamped_delta * f1_effective
+                            # Floor at baseline (or -0.2 for negative)
+                            ig_reward = max(ig_reward, min(self.baseline_reward, -0.2))
                             if turn_type == 'clarify' and self.clarify_bonus > 0:
                                 ig_reward += self.clarify_bonus
 
