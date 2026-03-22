@@ -428,10 +428,11 @@ class LLMGenerationManager:
                 k: v[active_mask] for k, v in rollings.batch.items()
             })
             rollings_active.meta_info.update(rollings.meta_info)
-            # 为 GPU padding 生成过程保留 non_tensor_batch（但实际生成不需要它们）
+            # Agent loop: n_agent provides diversity, use n=1 per generate call
+            rollings_active.meta_info['n_override'] = 1
             gen_output = self._generate_with_gpu_padding(rollings_active)
 
-            meta_info = gen_output.meta_info            
+            meta_info = gen_output.meta_info
             responses_ids, responses_str = self._postprocess_responses(gen_output.batch['responses'])
             responses_ids, responses_str = self.tensor_fn._example_level_pad(responses_ids, responses_str, active_mask)
 
@@ -553,10 +554,11 @@ class LLMGenerationManager:
                 k: v[active_mask] for k, v in rollings.batch.items()
             })
             rollings_active.meta_info.update(rollings.meta_info)
-            # 为 GPU padding 生成过程保留 non_tensor_batch（但实际生成不需要它们）
+            # Agent loop: n_agent provides diversity, use n=1 per generate call
+            rollings_active.meta_info['n_override'] = 1
             gen_output = self._generate_with_gpu_padding(rollings_active)
 
-            meta_info = gen_output.meta_info            
+            meta_info = gen_output.meta_info
             responses_ids, responses_str = self._postprocess_responses(gen_output.batch['responses'])
             responses_ids, responses_str = self.tensor_fn._example_level_pad(responses_ids, responses_str, active_mask)
 

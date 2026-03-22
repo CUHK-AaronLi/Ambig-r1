@@ -45,7 +45,9 @@ class IPORewardManager(BaseRewardManager):
                  efficiency_bonus=EFFICIENCY_BONUS,
                  baseline_reward=BASELINE_REWARD,
                  clarify_bonus=0.0,
-                 counterfactual_logprob=False):
+                 counterfactual_logprob=False,
+                 efficiency_gating=False,
+                 max_clarify_turns=3):
         super().__init__(tokenizer, num_examine, format_score, n_agent)
         self.alpha = alpha
         self.turn_cost = turn_cost
@@ -53,6 +55,8 @@ class IPORewardManager(BaseRewardManager):
         self.baseline_reward = baseline_reward
         self.clarify_bonus = clarify_bonus
         self.counterfactual_logprob = counterfactual_logprob
+        self.efficiency_gating = efficiency_gating
+        self.max_clarify_turns = max_clarify_turns
 
     def __call__(self, data: DataProto):
         if 'rm_scores' in data.batch.keys():
@@ -194,6 +198,14 @@ class IPORewardManager(BaseRewardManager):
                     for d in ig_details:
                         d['reward'] *= scale
                     ig_total = MAX_IG_PER_SAMPLE
+
+                # Efficiency gating: scale IG by (max - n) / max
+                # Fewer clarify turns → higher multiplier (PIR-style)
+                if self.efficiency_gating and n_intermediate > 0:
+                    eff = max(0.0, (self.max_clarify_turns - n_intermediate) / self.max_clarify_turns)
+                    for d in ig_details:
+                        d['reward'] *= eff
+                    ig_total *= eff
 
                 # Place IG rewards at turn token positions
                 turn_positions = self.find_turn_token_positions(
@@ -425,6 +437,8 @@ def main_task(config):
     baseline_reward = BASELINE_REWARD
     clarify_bonus = 0.0
     counterfactual_logprob = False
+    efficiency_gating = False
+    max_clarify_turns = 3
     if hasattr(config, 'ipo'):
         if hasattr(config.ipo, 'alpha'):
             alpha = config.ipo.alpha
@@ -438,9 +452,14 @@ def main_task(config):
             clarify_bonus = config.ipo.clarify_bonus
         if hasattr(config.ipo, 'counterfactual_logprob'):
             counterfactual_logprob = config.ipo.counterfactual_logprob
+        if hasattr(config.ipo, 'efficiency_gating'):
+            efficiency_gating = config.ipo.efficiency_gating
+        if hasattr(config.ipo, 'max_clarify_turns'):
+            max_clarify_turns = config.ipo.max_clarify_turns
     print(f"[IPO] alpha={alpha}, turn_cost={turn_cost}, efficiency_bonus={efficiency_bonus}, "
           f"baseline_reward={baseline_reward}, clarify_bonus={clarify_bonus}, "
-          f"counterfactual_logprob={counterfactual_logprob}, n_agent={n_agent}")
+          f"counterfactual_logprob={counterfactual_logprob}, efficiency_gating={efficiency_gating}, "
+          f"n_agent={n_agent}")
 
     log_main("Creating IPO reward manager")
     reward_fn = IPORewardManager(
@@ -448,12 +467,14 @@ def main_task(config):
         turn_cost=turn_cost, efficiency_bonus=efficiency_bonus,
         baseline_reward=baseline_reward, clarify_bonus=clarify_bonus,
         counterfactual_logprob=counterfactual_logprob,
+        efficiency_gating=efficiency_gating, max_clarify_turns=max_clarify_turns,
     )
     val_reward_fn = IPORewardManager(
         tokenizer=tokenizer, num_examine=2, n_agent=1, alpha=alpha,
         turn_cost=turn_cost, efficiency_bonus=efficiency_bonus,
         baseline_reward=baseline_reward, clarify_bonus=clarify_bonus,
         counterfactual_logprob=False,  # validation uses standard reward
+        efficiency_gating=efficiency_gating, max_clarify_turns=max_clarify_turns,
     )
 
     log_main("Creating resource pool manager")

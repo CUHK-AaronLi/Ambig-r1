@@ -6,7 +6,7 @@
 #SBATCH -o out/%j-%x.out
 #SBATCH -e out/%j-%x.err
 #SBATCH --time=18:00:00
-#SBATCH --gpus=8
+#SBATCH --gpus=4
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
@@ -16,9 +16,8 @@
 hostname
 echo "Job started at: $(date)"
 echo "Job ID: $SLURM_JOB_ID"
-echo "===== P0: Ablation IG + OOM fix on PACIFIC (200 steps, 8 GPU) ====="
-echo "Rollback to v8a config (ablation IG, F1-gated, baseline_reward=0.05)"
-echo "NEW: expandable_segments for OOM fix"
+echo "===== P0: Ablation IG on PACIFIC (200 steps, 4 GPU) ====="
+echo "Exact v8a config (4 GPU, batch=32, gpu_mem=0.5)"
 
 mkdir -p out
 
@@ -31,7 +30,8 @@ mkdir -p out
 export DATA_DIR=scripts/data_process/data/pacific_fewshot
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_MODE=offline
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# expandable_segments not supported on this cluster's CUDA version
+# export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new/code/verl_checkpoints/sft-clarify-warmup/global_step_330
 export EXPERIMENT_NAME=abl-ig-200
 
@@ -51,8 +51,8 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     data.val_files=$DATA_DIR/validation.parquet \
     data.train_data_num=null \
     data.val_data_num=100 \
-    data.train_batch_size=48 \
-    data.val_batch_size=48 \
+    data.train_batch_size=32 \
+    data.val_batch_size=32 \
     data.max_prompt_length=8192 \
     data.max_response_length=2048 \
     data.max_start_length=3072 \
@@ -65,8 +65,8 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.1 \
     actor_rollout_ref.actor.use_kl_loss=true \
-    actor_rollout_ref.actor.ppo_mini_batch_size=48 \
-    actor_rollout_ref.actor.ppo_micro_batch_size=8 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_micro_batch_size=4 \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=false \
     actor_rollout_ref.actor.fsdp_config.grad_offload=false \
@@ -74,7 +74,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size=16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.ref.log_prob_micro_batch_size=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.kl_loss_coef=0.04 \
@@ -87,9 +87,9 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     critic.model.enable_gradient_checkpointing=true \
     critic.model.path=$BASE_MODEL \
     critic.model.fsdp_config.param_offload=False \
-    critic.ppo_micro_batch_size=8 \
+    critic.ppo_micro_batch_size=4 \
     trainer.critic_warmup=0 \
-    trainer.n_gpus_per_node=8 \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
     trainer.test_freq=10 \

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name="cf-f1g"
+#SBATCH --job-name="cf-effg"
 #SBATCH --account=pgs
 #SBATCH --qos=low
 #SBATCH --partition=gemini
@@ -16,8 +16,9 @@
 hostname
 echo "Job started at: $(date)"
 echo "Job ID: $SLURM_JOB_ID"
-echo "===== P1: CF logprob + F1 gating on PACIFIC (200 steps, 8 GPU) ====="
-echo "Key change: ig_reward = alpha * per_turn_ig * f1 (was: alpha * per_turn_ig)"
+echo "===== CF F1-gated + Efficiency Gating (PIR-style) on PACIFIC (200 steps) ====="
+echo "Key change: ig_reward *= efficiency = (max_turns - n_clarify) / max_turns"
+echo "Compared to cf-f1gated: + efficiency_gating + NaN fix (kl=0.08, lr=2e-7, micro_bs=4)"
 
 mkdir -p out
 
@@ -31,8 +32,8 @@ export DATA_DIR=scripts/data_process/data/pacific_fewshot
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_MODE=offline
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new/code/verl_checkpoints/sft-clarify-warmup/global_step_330
-export EXPERIMENT_NAME=cf-f1gated
+export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints/sft-clarify-warmup/global_step_330
+export EXPERIMENT_NAME=cf-f1g-effgate
 
 if [ ! -d "$BASE_MODEL" ]; then
     echo "ERROR: SFT checkpoint not found at $BASE_MODEL"
@@ -42,8 +43,9 @@ fi
 echo "Checking simulator..."
 curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://10.10.211.118:8001/batch_generate -X POST -H "Content-Type: application/json" -d '{"prompts":["test"],"temperature":0.3}' && echo " - Simulator OK" || echo " - Simulator may be down"
 
-# P1: Counterfactual logprob IG WITH F1 gating, tc=0, 200 steps
-# Key difference from cf-tc00/tc01: ig_reward *= f1 in main_ppo_ipo.py
+# CF F1-gated + efficiency gating
+# Same as cf-f1gated but with efficiency_gating=true
+# IG reward scaled by (max_clarify - n_clarify) / max_clarify
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/validation.parquet \
@@ -60,22 +62,22 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     actor_rollout_ref.model.path=$BASE_MODEL \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.use_remove_padding=False \
-    actor_rollout_ref.actor.optim.lr=5e-7 \
+    actor_rollout_ref.actor.optim.lr=2e-7 \
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.1 \
     actor_rollout_ref.actor.use_kl_loss=true \
     actor_rollout_ref.actor.ppo_mini_batch_size=32 \
-    actor_rollout_ref.actor.ppo_micro_batch_size=8 \
+    actor_rollout_ref.actor.ppo_micro_batch_size=4 \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=false \
     actor_rollout_ref.actor.fsdp_config.grad_offload=false \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=false \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size=16 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
-    actor_rollout_ref.ref.log_prob_micro_batch_size=16 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size=8 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.kl_loss_coef=0.04 \
+    actor_rollout_ref.actor.kl_loss_coef=0.08 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     algorithm.no_think_rl=false \
     actor_rollout_ref.rollout.n_agent=4 \
@@ -112,12 +114,14 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     +ipo.efficiency_bonus=0.0 \
     +ipo.baseline_reward=0.0 \
     +ipo.clarify_bonus=0.0 \
+    +ipo.efficiency_gating=true \
+    +ipo.max_clarify_turns=3 \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.default_local_dir=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/$EXPERIMENT_NAME \
     2>&1 | tee $EXPERIMENT_NAME.log
 
 echo ""
-echo "===== CF F1-Gated Results ====="
+echo "===== CF F1-Gated + Efficiency Gating Results ====="
 grep -E "val/f1|val/clarify" $EXPERIMENT_NAME.log | tail -30
 echo ""
 echo "Job finished at: $(date)"

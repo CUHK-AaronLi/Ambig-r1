@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name="cf-f1g"
+#SBATCH --job-name="cf-tc03"
 #SBATCH --account=pgs
 #SBATCH --qos=low
 #SBATCH --partition=gemini
 #SBATCH -o out/%j-%x.out
 #SBATCH -e out/%j-%x.err
-#SBATCH --time=18:00:00
+#SBATCH --time=4:00:00
 #SBATCH --gpus=4
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -16,8 +16,8 @@
 hostname
 echo "Job started at: $(date)"
 echo "Job ID: $SLURM_JOB_ID"
-echo "===== P1: CF logprob + F1 gating on PACIFIC (200 steps, 8 GPU) ====="
-echo "Key change: ig_reward = alpha * per_turn_ig * f1 (was: alpha * per_turn_ig)"
+echo "===== DIAG: CF Logprob + turn_cost=0.03 on PACIFIC (20 steps, 4 GPU) ====="
+echo "Compare with cf-logprob-100 (turn_cost=0.0) to see if turn_cost regularizes over-clarification"
 
 mkdir -p out
 
@@ -30,9 +30,8 @@ mkdir -p out
 export DATA_DIR=scripts/data_process/data/pacific_fewshot
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_MODE=offline
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new/code/verl_checkpoints/sft-clarify-warmup/global_step_330
-export EXPERIMENT_NAME=cf-f1gated
+export EXPERIMENT_NAME=diag-cf-tc03
 
 if [ ! -d "$BASE_MODEL" ]; then
     echo "ERROR: SFT checkpoint not found at $BASE_MODEL"
@@ -42,8 +41,8 @@ fi
 echo "Checking simulator..."
 curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://10.10.211.118:8001/batch_generate -X POST -H "Content-Type: application/json" -d '{"prompts":["test"],"temperature":0.3}' && echo " - Simulator OK" || echo " - Simulator may be down"
 
-# P1: Counterfactual logprob IG WITH F1 gating, tc=0, 200 steps
-# Key difference from cf-tc00/tc01: ig_reward *= f1 in main_ppo_ipo.py
+# Same as CF-100 but with turn_cost=0.03 and 4 GPUs / 20 steps
+# turn_cost penalizes each clarify turn, should regularize over-clarification
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/validation.parquet \
@@ -64,36 +63,36 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.1 \
     actor_rollout_ref.actor.use_kl_loss=true \
     actor_rollout_ref.actor.ppo_mini_batch_size=32 \
-    actor_rollout_ref.actor.ppo_micro_batch_size=8 \
+    actor_rollout_ref.actor.ppo_micro_batch_size=4 \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.fsdp_config.param_offload=false \
-    actor_rollout_ref.actor.fsdp_config.grad_offload=false \
+    actor_rollout_ref.actor.fsdp_config.grad_offload=true \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=false \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size=16 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
-    actor_rollout_ref.ref.log_prob_micro_batch_size=16 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size=8 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.kl_loss_coef=0.04 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     algorithm.no_think_rl=false \
-    actor_rollout_ref.rollout.n_agent=4 \
+    actor_rollout_ref.rollout.n_agent=5 \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.temperature=0.7 \
     critic.optim.lr=1e-5 \
     critic.model.enable_gradient_checkpointing=true \
     critic.model.path=$BASE_MODEL \
     critic.model.fsdp_config.param_offload=False \
-    critic.ppo_micro_batch_size=8 \
+    critic.ppo_micro_batch_size=4 \
     trainer.critic_warmup=0 \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
-    trainer.test_freq=10 \
+    trainer.test_freq=5 \
     trainer.project_name=Ambig-R1 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=200 \
+    trainer.total_training_steps=20 \
     trainer.default_hdfs_dir=null \
     trainer.num_cpus=16 \
     max_turns=4 \
@@ -106,7 +105,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     +ambigqa.enable_entropy=false \
     +ambigqa.enable_search_action=false \
     +ipo.alpha=0.1 \
-    +ipo.turn_cost=0.0 \
+    +ipo.turn_cost=0.03 \
     +ipo.counterfactual_logprob=true \
     +ipo.enable_ablation=false \
     +ipo.efficiency_bonus=0.0 \
@@ -117,7 +116,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     2>&1 | tee $EXPERIMENT_NAME.log
 
 echo ""
-echo "===== CF F1-Gated Results ====="
-grep -E "val/f1|val/clarify" $EXPERIMENT_NAME.log | tail -30
+echo "===== CF + turn_cost=0.03 Results ====="
+grep -E "Counterfactual-IG|val/f1|val/clarify" $EXPERIMENT_NAME.log | tail -20
 echo ""
 echo "Job finished at: $(date)"

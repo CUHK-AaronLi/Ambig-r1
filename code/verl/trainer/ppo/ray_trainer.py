@@ -851,7 +851,9 @@ class RayPPOTrainer(object):
                 timing_raw = {}
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
-                batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n_agent, interleave=True)
+                # Only repeat by n_agent in agent (do_search) path; non-agent path repeats by n later
+                if self.config.do_search:
+                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n_agent, interleave=True)
 
                 # pop those keys for generation, include extra_info for clarify action
                 gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'], 
@@ -897,9 +899,10 @@ class RayPPOTrainer(object):
                         # batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
                         #                                         dtype=object)
                         batch.non_tensor_batch['uid'] = batch.non_tensor_batch['index'].copy()
-                                            
-                        # repeat to align with repeated responses in rollout
-                        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+
+                        # Agent path: n_agent already provides diversity (n rollouts per query).
+                        # Do NOT repeat by n here — run_llm_loop returns 1 trajectory per agent copy.
+                        # Non-agent path (above) uses vLLM's n for expansion.
                         batch = batch.union(final_gen_batch_output)
 
                     ####################
@@ -972,11 +975,13 @@ class RayPPOTrainer(object):
                             batch.batch['token_level_rewards'] = batch.batch['token_level_scores']
 
                         # compute advantages, executed on the driver process
+                        # Agent path uses n_agent for diversity; non-agent path uses n
+                        effective_n = self.config.actor_rollout_ref.rollout.n_agent if self.config.do_search else self.config.actor_rollout_ref.rollout.n
                         batch = compute_advantage(batch,
                                                   adv_estimator=self.config.algorithm.adv_estimator,
                                                   gamma=self.config.algorithm.gamma,
                                                   lam=self.config.algorithm.lam,
-                                                  num_repeat=self.config.actor_rollout_ref.rollout.n)
+                                                  num_repeat=effective_n)
 
                         # AReW critique: optionally modify advantages with step-level critique signals
                         if hasattr(self.config, 'arew') and getattr(self.config.arew, 'enable', False):

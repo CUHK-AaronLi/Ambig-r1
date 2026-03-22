@@ -1,12 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name="cf-f1g"
+#SBATCH --job-name="abl-v8a"
 #SBATCH --account=pgs
 #SBATCH --qos=low
 #SBATCH --partition=gemini
 #SBATCH -o out/%j-%x.out
 #SBATCH -e out/%j-%x.err
-#SBATCH --time=18:00:00
-#SBATCH --gpus=4
+#SBATCH --time=24:00:00
+#SBATCH --gpus=8
+#SBATCH --exclude=CPIIGPU-211-128
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
@@ -16,10 +17,6 @@
 hostname
 echo "Job started at: $(date)"
 echo "Job ID: $SLURM_JOB_ID"
-echo "===== P1: CF logprob + F1 gating on PACIFIC (200 steps, 8 GPU) ====="
-echo "Key change: ig_reward = alpha * per_turn_ig * f1 (was: alpha * per_turn_ig)"
-
-mkdir -p out
 
 source ~/anaconda3/bin/activate
 eval "$(conda shell.bash hook)"
@@ -28,22 +25,22 @@ cd /mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code
 mkdir -p out
 
 export DATA_DIR=scripts/data_process/data/pacific_fewshot
+export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new/code/verl_checkpoints/sft-clarify-warmup/global_step_330
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_MODE=offline
+export EXPERIMENT_NAME=abl-v8a-200
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new/code/verl_checkpoints/sft-clarify-warmup/global_step_330
-export EXPERIMENT_NAME=cf-f1gated
+export AZURE_ENDPOINT="https://cpii-s5.openai.azure.com/"
+export AZURE_API_KEY="91e5ea9bf61c4769a44b0b0b5c67d559"
+export AZURE_DEPLOYMENT="gpt-4o"
+export AZURE_API_VERSION="2024-02-01"
 
-if [ ! -d "$BASE_MODEL" ]; then
-    echo "ERROR: SFT checkpoint not found at $BASE_MODEL"
-    exit 1
-fi
+echo "===== Ablation IG + v8a Config (200 steps) ====="
+echo "Purpose: Test ablation IG reward with v8a's proven hyperparams"
+echo "ONLY CHANGE from v8a: enable_ablation=true (was false)"
+echo "Key params restored: n_agent=5, temp=1.0, state_masking=true, micro_batch=8, gpu_mem=0.5"
+echo "Early kill: step30<0.30, step60<0.40, step100<0.48"
 
-echo "Checking simulator..."
-curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://10.10.211.118:8001/batch_generate -X POST -H "Content-Type: application/json" -d '{"prompts":["test"],"temperature":0.3}' && echo " - Simulator OK" || echo " - Simulator may be down"
-
-# P1: Counterfactual logprob IG WITH F1 gating, tc=0, 200 steps
-# Key difference from cf-tc00/tc01: ig_reward *= f1 in main_ppo_ipo.py
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     data.train_files=$DATA_DIR/train.parquet \
     data.val_files=$DATA_DIR/validation.parquet \
@@ -78,16 +75,14 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     actor_rollout_ref.actor.kl_loss_coef=0.04 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     algorithm.no_think_rl=false \
-    actor_rollout_ref.rollout.n_agent=4 \
-    actor_rollout_ref.rollout.n=8 \
-    actor_rollout_ref.rollout.temperature=0.7 \
-    critic.optim.lr=1e-5 \
-    critic.model.enable_gradient_checkpointing=true \
-    critic.model.path=$BASE_MODEL \
-    critic.model.fsdp_config.param_offload=False \
-    critic.ppo_micro_batch_size=8 \
-    trainer.critic_warmup=0 \
-    trainer.n_gpus_per_node=4 \
+    actor_rollout_ref.rollout.n_agent=5 \
+    actor_rollout_ref.rollout.temperature=1 \
+    actor_rollout_ref.actor.state_masking=true \
+    +ambigqa.enable_search_action=false \
+    trainer.logger=['console','wandb'] \
+    +trainer.val_only=false \
+    +trainer.val_before_train=true \
+    trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
     trainer.test_freq=10 \
@@ -95,7 +90,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     trainer.total_epochs=1 \
     trainer.total_training_steps=200 \
     trainer.default_hdfs_dir=null \
-    trainer.num_cpus=16 \
+    trainer.num_cpus=40 \
     max_turns=4 \
     +ambigqa.enable_clarify_action=true \
     +ambigqa.max_clarify_turns=3 \
@@ -104,11 +99,10 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     +ambigqa.azure_openai_api_key="91e5ea9bf61c4769a44b0b0b5c67d559" \
     +ambigqa.azure_openai_deployment="gpt-4o" \
     +ambigqa.enable_entropy=false \
-    +ambigqa.enable_search_action=false \
     +ipo.alpha=0.1 \
     +ipo.turn_cost=0.0 \
-    +ipo.counterfactual_logprob=true \
-    +ipo.enable_ablation=false \
+    +ipo.enable_ablation=true \
+    +ipo.counterfactual_logprob=false \
     +ipo.efficiency_bonus=0.0 \
     +ipo.baseline_reward=0.0 \
     +ipo.clarify_bonus=0.0 \
@@ -117,7 +111,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     2>&1 | tee $EXPERIMENT_NAME.log
 
 echo ""
-echo "===== CF F1-Gated Results ====="
-grep -E "val/f1|val/clarify" $EXPERIMENT_NAME.log | tail -30
+echo "===== Ablation v8a 200-step Results ====="
+grep -E "val/f1|val/clarify|grad_norm" $EXPERIMENT_NAME.log | tail -30
 echo ""
 echo "Job finished at: $(date)"
