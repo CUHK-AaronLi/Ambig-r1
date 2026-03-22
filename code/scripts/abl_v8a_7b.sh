@@ -37,7 +37,7 @@ export AZURE_API_VERSION="2024-02-01"
 
 echo "===== Ablation IG + v8a Config + Qwen2.5-7B (200 steps) ====="
 echo "Model: Qwen2.5-7B (SFT warmup best checkpoint)"
-echo "Reward: ablation IG with P0 fixes (negative delta + F1 floor)"
+echo "Reward: ablation IG with P0 fixes + IG threshold 0.20"
 echo "Memory: micro_batch=4, log_prob_micro=8, gpu_mem=0.5, 8 GPU"
 echo "Early kill: step30<0.30, step60<0.40, step100<0.48"
 
@@ -114,6 +114,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     +ipo.efficiency_bonus=0.0 \
     +ipo.baseline_reward=0.0 \
     +ipo.clarify_bonus=0.0 \
+    +ipo.ig_threshold=0.20 \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.default_local_dir=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/$EXPERIMENT_NAME \
     2>&1 | tee $EXPERIMENT_NAME.log
