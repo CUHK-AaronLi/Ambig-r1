@@ -25,7 +25,7 @@ cd /mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code
 mkdir -p out
 
 export DATA_DIR=scripts/data_process/data/pacific_fewshot
-export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new/code/verl_checkpoints/sft-clarify-warmup/global_step_330
+export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints/sft-clarify-warmup/global_step_330
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_MODE=offline
 export EXPERIMENT_NAME=abl-v8a-200
