@@ -666,9 +666,15 @@ class RayPPOTrainer(object):
                     stats['f1s_no_clarify'].append(f1)
 
                 # Split by ambiguity label (if available in extra_info)
+                # Supports both _is_ambiguous (AmbigNQ, SituatedQA) and req_clari (PACIFIC)
                 extra_info = data_item.non_tensor_batch.get('extra_info', {})
                 if isinstance(extra_info, dict):
                     is_ambig = extra_info.get('_is_ambiguous', None)
+                    if is_ambig is None:
+                        # PACIFIC uses req_clari instead of _is_ambiguous
+                        req_clari = extra_info.get('req_clari', None)
+                        if req_clari is not None:
+                            is_ambig = bool(req_clari)
                     if is_ambig is True:
                         stats['f1s_ambiguous'].append(f1)
                         stats['n_ambig'] += 1
