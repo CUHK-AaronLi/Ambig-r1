@@ -43,7 +43,7 @@ echo "Early kill: step30 F1<0.15 or clr<5%, step60 F1<0.25 or clr<10%"
 
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     data.train_files=$DATA_DIR/train.parquet \
-    data.val_files=$DATA_DIR/validation.parquet \
+    data.val_files=$DATA_DIR/tinytest.parquet \
     data.train_data_num=null \
     data.val_data_num=100 \
     data.train_batch_size=32 \
