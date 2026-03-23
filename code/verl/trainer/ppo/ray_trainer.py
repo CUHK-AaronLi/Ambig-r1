@@ -634,6 +634,9 @@ class RayPPOTrainer(object):
                         'f1s': [], 'answer_extracted': 0,
                         'clarify': 0, 'search': 0, 'answer': 0, 'total': 0,
                         'f1s_with_clarify': [], 'f1s_no_clarify': [],
+                        'f1s_ambiguous': [], 'f1s_non_ambiguous': [],
+                        'clarify_on_ambig': 0, 'clarify_on_non_ambig': 0,
+                        'n_ambig': 0, 'n_non_ambig': 0,
                     }
                 stats = per_source[data_source]
                 stats['total'] += 1
@@ -662,6 +665,21 @@ class RayPPOTrainer(object):
                 else:
                     stats['f1s_no_clarify'].append(f1)
 
+                # Split by ambiguity label (if available in extra_info)
+                extra_info = data_item.non_tensor_batch.get('extra_info', {})
+                if isinstance(extra_info, dict):
+                    is_ambig = extra_info.get('_is_ambiguous', None)
+                    if is_ambig is True:
+                        stats['f1s_ambiguous'].append(f1)
+                        stats['n_ambig'] += 1
+                        if n_clarify > 0:
+                            stats['clarify_on_ambig'] += 1
+                    elif is_ambig is False:
+                        stats['f1s_non_ambiguous'].append(f1)
+                        stats['n_non_ambig'] += 1
+                        if n_clarify > 0:
+                            stats['clarify_on_non_ambig'] += 1
+
         metrics = {}
         for ds, stats in per_source.items():
             n = stats['total']
@@ -683,6 +701,16 @@ class RayPPOTrainer(object):
             if len(stats['f1s_no_clarify']) > 0:
                 metrics[f'val/no_clarify_f1/{ds}'] = np.mean(stats['f1s_no_clarify'])
                 metrics[f'val/no_clarify_n/{ds}'] = len(stats['f1s_no_clarify'])
+            # Ambiguity-stratified metrics
+            if len(stats['f1s_ambiguous']) > 0:
+                metrics[f'val/f1_ambiguous/{ds}'] = np.mean(stats['f1s_ambiguous'])
+            if len(stats['f1s_non_ambiguous']) > 0:
+                metrics[f'val/f1_non_ambiguous/{ds}'] = np.mean(stats['f1s_non_ambiguous'])
+            # Clarify rate by ambiguity (key selectivity metric)
+            if stats['n_ambig'] > 0:
+                metrics[f'val/clarify_rate_ambig/{ds}'] = stats['clarify_on_ambig'] / stats['n_ambig']
+            if stats['n_non_ambig'] > 0:
+                metrics[f'val/clarify_rate_non_ambig/{ds}'] = stats['clarify_on_non_ambig'] / stats['n_non_ambig']
 
         print(f"[Val Raw Metrics] {metrics}")
         return metrics
