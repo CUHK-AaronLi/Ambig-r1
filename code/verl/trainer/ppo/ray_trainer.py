@@ -633,6 +633,7 @@ class RayPPOTrainer(object):
                     per_source[data_source] = {
                         'f1s': [], 'answer_extracted': 0,
                         'clarify': 0, 'search': 0, 'answer': 0, 'total': 0,
+                        'f1s_with_clarify': [], 'f1s_no_clarify': [],
                     }
                 stats = per_source[data_source]
                 stats['total'] += 1
@@ -655,6 +656,12 @@ class RayPPOTrainer(object):
                 stats['search'] += n_search
                 stats['answer'] += n_answer
 
+                # Split F1 by whether sample clarified (for Post-Clarify F1)
+                if n_clarify > 0:
+                    stats['f1s_with_clarify'].append(f1)
+                else:
+                    stats['f1s_no_clarify'].append(f1)
+
         metrics = {}
         for ds, stats in per_source.items():
             n = stats['total']
@@ -669,6 +676,13 @@ class RayPPOTrainer(object):
                 metrics[f'val/answer_action_rate/{ds}'] = stats['answer'] / total_actions
             metrics[f'val/avg_clarify/{ds}'] = stats['clarify'] / n
             metrics[f'val/avg_search/{ds}'] = stats['search'] / n
+            # Post-Clarify F1: F1 only on samples that clarified
+            if len(stats['f1s_with_clarify']) > 0:
+                metrics[f'val/post_clarify_f1/{ds}'] = np.mean(stats['f1s_with_clarify'])
+                metrics[f'val/post_clarify_n/{ds}'] = len(stats['f1s_with_clarify'])
+            if len(stats['f1s_no_clarify']) > 0:
+                metrics[f'val/no_clarify_f1/{ds}'] = np.mean(stats['f1s_no_clarify'])
+                metrics[f'val/no_clarify_n/{ds}'] = len(stats['f1s_no_clarify'])
 
         print(f"[Val Raw Metrics] {metrics}")
         return metrics
