@@ -141,6 +141,11 @@ def main():
 
     pacific_examples = extract_pacific_sft_examples(pacific_df, n_samples=args.n_pacific, seed=args.seed)
 
+    # Filter out too-long examples (>3500 chars to stay under 4096 tokens)
+    before = len(pacific_examples)
+    pacific_examples = [ex for ex in pacific_examples if len(ex["prompt"]) + len(ex["response"]) < 3500]
+    print(f"Filtered PACIFIC: {before} -> {len(pacific_examples)} (removed {before - len(pacific_examples)} too-long)")
+
     # --- Merge ---
     all_examples = existing_examples + pacific_examples
     random.shuffle(all_examples)
