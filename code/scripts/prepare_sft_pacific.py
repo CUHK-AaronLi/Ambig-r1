@@ -28,11 +28,13 @@ def extract_pacific_sft_examples(pacific_df: pd.DataFrame, n_samples: int = 3000
         # Extract prompt text from the prompt column
         # PACIFIC prompt is stored as list: [{"role": "user", "content": "..."}]
         prompt_data = row["prompt"]
+        # prompt may be numpy.ndarray, list, or str
+        if hasattr(prompt_data, 'tolist'):
+            prompt_data = prompt_data.tolist()  # numpy array -> list
         if isinstance(prompt_data, list):
-            # Standard format from pacific_fewshot.py
+            # Standard format: [{"role": "user", "content": "..."}]
             prompt_text = prompt_data[0]["content"] if len(prompt_data) > 0 else ""
         elif isinstance(prompt_data, str):
-            # If somehow stored as string
             prompt_text = prompt_data
         else:
             continue
@@ -59,6 +61,8 @@ def extract_pacific_sft_examples(pacific_df: pd.DataFrame, n_samples: int = 3000
                 ground_truth = {"target": [ground_truth]}
 
         target = ground_truth.get("target", [])
+        if hasattr(target, 'tolist'):
+            target = target.tolist()  # numpy array -> list
         if not target:
             continue
 
