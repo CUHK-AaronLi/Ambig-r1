@@ -6,7 +6,7 @@
 #SBATCH -o out/%j-%x.out
 #SBATCH -e out/%j-%x.err
 #SBATCH --time=2:00:00
-#SBATCH --gpus=4
+#SBATCH --gpus=1
 #SBATCH --exclude=CPIIGPU-211-128
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

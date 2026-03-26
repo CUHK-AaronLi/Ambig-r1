@@ -74,8 +74,8 @@ def main():
 
     llm = LLM(
         model=args.model_path,
-        tensor_parallel_size=4,
-        gpu_memory_utilization=0.8,
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.85,
         trust_remote_code=True,
     )
 
