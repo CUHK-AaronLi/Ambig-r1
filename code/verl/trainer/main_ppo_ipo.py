@@ -48,7 +48,8 @@ class IPORewardManager(BaseRewardManager):
                  counterfactual_logprob=False,
                  efficiency_gating=False,
                  max_clarify_turns=3,
-                 ig_threshold=0.0):
+                 ig_threshold=0.0,
+                 ambiguity_penalty=0.0):
         super().__init__(tokenizer, num_examine, format_score, n_agent)
         self.alpha = alpha
         self.turn_cost = turn_cost
@@ -59,6 +60,7 @@ class IPORewardManager(BaseRewardManager):
         self.efficiency_gating = efficiency_gating
         self.max_clarify_turns = max_clarify_turns
         self.ig_threshold = ig_threshold
+        self.ambiguity_penalty = ambiguity_penalty
 
     def __call__(self, data: DataProto):
         if 'rm_scores' in data.batch.keys():
@@ -237,6 +239,31 @@ class IPORewardManager(BaseRewardManager):
                 reward_tensor[i, valid_response_length - 1] += turn_penalty
 
             # ============================================================
+            # 4b. Ambiguity-aware reward (oracle or classifier-based)
+            # ============================================================
+            ambig_reward = 0.0
+            if self.ambiguity_penalty > 0 and valid_response_length > 0:
+                extra_info = data_item.non_tensor_batch.get('extra_info', {})
+                if isinstance(extra_info, dict):
+                    # Support both _is_ambiguous (AmbigNQ, SituatedQA) and req_clari (PACIFIC)
+                    is_ambig = extra_info.get('_is_ambiguous', None)
+                    if is_ambig is None:
+                        req_clari = extra_info.get('req_clari', None)
+                        if req_clari is not None:
+                            is_ambig = bool(req_clari)
+
+                    n_clarify = len([t for t in intermediate_turns if t['type'] == 'clarify'])
+                    if is_ambig is True and n_clarify == 0:
+                        # Should have clarified but didn't
+                        ambig_reward = -self.ambiguity_penalty
+                    elif is_ambig is False and n_clarify > 0:
+                        # Shouldn't have clarified but did
+                        ambig_reward = -self.ambiguity_penalty * 0.5
+
+                    if ambig_reward != 0:
+                        reward_tensor[i, valid_response_length - 1] += ambig_reward
+
+            # ============================================================
             # 5. Invalid action penalty
             # ============================================================
             n_invalid = self._count_invalid_actions(response_str)
@@ -267,9 +294,10 @@ class IPORewardManager(BaseRewardManager):
                 ) if ig_details else "none"
                 tc_str = f" tc={-self.turn_cost * n_intermediate:.3f}" if self.turn_cost > 0 else ""
                 cb_str = f" cb={self.clarify_bonus:.3f}" if self.clarify_bonus > 0 else ""
+                ab_str = f" ambig={ambig_reward:.3f}" if ambig_reward != 0 else ""
                 print(
                     f"[IPOv3] F1={f1:.3f} turns={n_intermediate} invalid={n_invalid} "
-                    f"IG={ig_total:.3f}({ig_source}) conf={confidence:.3f}{tc_str}{cb_str} [{detail_str}] "
+                    f"IG={ig_total:.3f}({ig_source}) conf={confidence:.3f}{tc_str}{cb_str}{ab_str} [{detail_str}] "
                     f"| {response_str[:200]}"
                 )
 
@@ -445,6 +473,7 @@ def main_task(config):
     efficiency_gating = False
     max_clarify_turns = 3
     ig_threshold = 0.0
+    ambiguity_penalty = 0.0
     if hasattr(config, 'ipo'):
         if hasattr(config.ipo, 'alpha'):
             alpha = config.ipo.alpha
@@ -464,10 +493,12 @@ def main_task(config):
             max_clarify_turns = config.ipo.max_clarify_turns
         if hasattr(config.ipo, 'ig_threshold'):
             ig_threshold = config.ipo.ig_threshold
+        if hasattr(config.ipo, 'ambiguity_penalty'):
+            ambiguity_penalty = config.ipo.ambiguity_penalty
     print(f"[IPO] alpha={alpha}, turn_cost={turn_cost}, efficiency_bonus={efficiency_bonus}, "
           f"baseline_reward={baseline_reward}, clarify_bonus={clarify_bonus}, "
           f"counterfactual_logprob={counterfactual_logprob}, efficiency_gating={efficiency_gating}, "
-          f"ig_threshold={ig_threshold}, n_agent={n_agent}")
+          f"ig_threshold={ig_threshold}, ambiguity_penalty={ambiguity_penalty}, n_agent={n_agent}")
 
     log_main("Creating IPO reward manager")
     reward_fn = IPORewardManager(
@@ -476,7 +507,7 @@ def main_task(config):
         baseline_reward=baseline_reward, clarify_bonus=clarify_bonus,
         counterfactual_logprob=counterfactual_logprob,
         efficiency_gating=efficiency_gating, max_clarify_turns=max_clarify_turns,
-        ig_threshold=ig_threshold,
+        ig_threshold=ig_threshold, ambiguity_penalty=ambiguity_penalty,
     )
     val_reward_fn = IPORewardManager(
         tokenizer=tokenizer, num_examine=2, n_agent=1, alpha=alpha,
@@ -484,7 +515,7 @@ def main_task(config):
         baseline_reward=baseline_reward, clarify_bonus=clarify_bonus,
         counterfactual_logprob=False,  # validation uses standard reward
         efficiency_gating=efficiency_gating, max_clarify_turns=max_clarify_turns,
-        ig_threshold=ig_threshold,
+        ig_threshold=ig_threshold, ambiguity_penalty=ambiguity_penalty,
     )
 
     log_main("Creating resource pool manager")
