@@ -25,8 +25,8 @@ cd /mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code
 mkdir -p out
 
 export DATA_DIR=scripts/data_process/data/pacific_fewshot
-# Continue from PACIFIC SFT step 40 (peak F1=0.615, 0% clarify)
-export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/abl-7b-pacific-sft/actor/global_step_40
+# From PACIFIC SFT checkpoint (clean start)
+export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints/sft-7b-pacific/global_step_best
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_MODE=offline
 export EXPERIMENT_NAME=abl-7b-psft-alpha02
@@ -37,7 +37,7 @@ export AZURE_DEPLOYMENT="gpt-4o"
 export AZURE_API_VERSION="2024-02-01"
 
 echo "===== 7B PACIFIC-SFT cont: alpha=0.2, push clarify ====="
-echo "From: abl-7b-pacific-sft step 40 (F1=0.615, 0% clarify)"
+echo "From: sft-7b-pacific/global_step_best (clean SFT start)"
 echo "Goal: Higher alpha to incentivize clarification"
 
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
@@ -87,7 +87,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     trainer.test_freq=10 \
     trainer.project_name=Ambig-R1 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=100 \
+    trainer.total_training_steps=200 \
     trainer.default_hdfs_dir=null \
     trainer.num_cpus=40 \
     max_turns=4 \
