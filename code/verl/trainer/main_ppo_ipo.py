@@ -118,7 +118,23 @@ class IPORewardManager(BaseRewardManager):
             ig_details = []
             ig_source = "none"
 
-            if n_intermediate > 0:
+            # Ambiguity-aware IG gating: disable IG for non-ambiguous questions
+            is_ambig_sample = None
+            if self.ambiguity_penalty > 0:
+                extra_info = data_item.non_tensor_batch.get('extra_info', {})
+                if isinstance(extra_info, dict):
+                    is_ambig_sample = extra_info.get('_is_ambiguous', None)
+                    if is_ambig_sample is None:
+                        req_clari = extra_info.get('req_clari', None)
+                        if req_clari is not None:
+                            is_ambig_sample = bool(req_clari)
+
+            # Skip IG computation for non-ambiguous questions (IG gated off)
+            compute_ig = True
+            if self.ambiguity_penalty > 0 and is_ambig_sample is False:
+                compute_ig = False
+
+            if n_intermediate > 0 and compute_ig:
                 # Priority: counterfactual logprob > ablation > fallback
                 if use_counterfactual and counterfactual_ig_scores[i] is not None:
                     # ---- Counterfactual logprob IG (true counterfactual) ----
@@ -243,25 +259,16 @@ class IPORewardManager(BaseRewardManager):
             # ============================================================
             ambig_reward = 0.0
             if self.ambiguity_penalty > 0 and valid_response_length > 0:
-                extra_info = data_item.non_tensor_batch.get('extra_info', {})
-                if isinstance(extra_info, dict):
-                    # Support both _is_ambiguous (AmbigNQ, SituatedQA) and req_clari (PACIFIC)
-                    is_ambig = extra_info.get('_is_ambiguous', None)
-                    if is_ambig is None:
-                        req_clari = extra_info.get('req_clari', None)
-                        if req_clari is not None:
-                            is_ambig = bool(req_clari)
+                n_clarify = len([t for t in intermediate_turns if t['type'] == 'clarify'])
+                if is_ambig_sample is True and n_clarify == 0:
+                    # Should have clarified but didn't → penalty
+                    ambig_reward = -self.ambiguity_penalty
+                elif is_ambig_sample is False and n_clarify > 0:
+                    # Shouldn't have clarified but did → penalty (IG already gated off above)
+                    ambig_reward = -self.ambiguity_penalty
 
-                    n_clarify = len([t for t in intermediate_turns if t['type'] == 'clarify'])
-                    if is_ambig is True and n_clarify == 0:
-                        # Should have clarified but didn't
-                        ambig_reward = -self.ambiguity_penalty
-                    elif is_ambig is False and n_clarify > 0:
-                        # Shouldn't have clarified but did
-                        ambig_reward = -self.ambiguity_penalty * 0.5
-
-                    if ambig_reward != 0:
-                        reward_tensor[i, valid_response_length - 1] += ambig_reward
+                if ambig_reward != 0:
+                    reward_tensor[i, valid_response_length - 1] += ambig_reward
 
             # ============================================================
             # 5. Invalid action penalty
