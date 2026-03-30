@@ -49,9 +49,11 @@ class IPORewardManager(BaseRewardManager):
                  efficiency_gating=False,
                  max_clarify_turns=3,
                  ig_threshold=0.0,
-                 ambiguity_penalty=0.0):
+                 ambiguity_penalty=0.0,
+                 outcome_scale=1.0):
         super().__init__(tokenizer, num_examine, format_score, n_agent)
         self.alpha = alpha
+        self.outcome_scale = outcome_scale
         self.turn_cost = turn_cost
         self.efficiency_bonus = efficiency_bonus
         self.baseline_reward = baseline_reward
@@ -100,7 +102,7 @@ class IPORewardManager(BaseRewardManager):
             # 1. F1 outcome reward at last valid token
             # ============================================================
             if valid_response_length > 0:
-                reward_tensor[i, valid_response_length - 1] = f1
+                reward_tensor[i, valid_response_length - 1] = f1 * self.outcome_scale
 
             # ============================================================
             # 2. Parse turns with their observations
@@ -488,6 +490,7 @@ def main_task(config):
     max_clarify_turns = 3
     ig_threshold = 0.0
     ambiguity_penalty = 0.0
+    outcome_scale = 1.0
     if hasattr(config, 'ipo'):
         if hasattr(config.ipo, 'alpha'):
             alpha = config.ipo.alpha
@@ -509,10 +512,13 @@ def main_task(config):
             ig_threshold = config.ipo.ig_threshold
         if hasattr(config.ipo, 'ambiguity_penalty'):
             ambiguity_penalty = config.ipo.ambiguity_penalty
+        if hasattr(config.ipo, 'outcome_scale'):
+            outcome_scale = config.ipo.outcome_scale
     print(f"[IPO] alpha={alpha}, turn_cost={turn_cost}, efficiency_bonus={efficiency_bonus}, "
           f"baseline_reward={baseline_reward}, clarify_bonus={clarify_bonus}, "
           f"counterfactual_logprob={counterfactual_logprob}, efficiency_gating={efficiency_gating}, "
-          f"ig_threshold={ig_threshold}, ambiguity_penalty={ambiguity_penalty}, n_agent={n_agent}")
+          f"ig_threshold={ig_threshold}, ambiguity_penalty={ambiguity_penalty}, "
+          f"outcome_scale={outcome_scale}, n_agent={n_agent}")
 
     log_main("Creating IPO reward manager")
     reward_fn = IPORewardManager(
@@ -522,6 +528,7 @@ def main_task(config):
         counterfactual_logprob=counterfactual_logprob,
         efficiency_gating=efficiency_gating, max_clarify_turns=max_clarify_turns,
         ig_threshold=ig_threshold, ambiguity_penalty=ambiguity_penalty,
+        outcome_scale=outcome_scale,
     )
     val_reward_fn = IPORewardManager(
         tokenizer=tokenizer, num_examine=2, n_agent=1, alpha=alpha,
@@ -530,6 +537,7 @@ def main_task(config):
         counterfactual_logprob=False,  # validation uses standard reward
         efficiency_gating=efficiency_gating, max_clarify_turns=max_clarify_turns,
         ig_threshold=ig_threshold, ambiguity_penalty=ambiguity_penalty,
+        outcome_scale=outcome_scale,
     )
 
     log_main("Creating resource pool manager")
