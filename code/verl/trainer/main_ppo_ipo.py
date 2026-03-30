@@ -121,13 +121,20 @@ class IPORewardManager(BaseRewardManager):
             # Ambiguity-aware IG gating: disable IG for non-ambiguous questions
             is_ambig_sample = None
             if self.ambiguity_penalty > 0:
-                extra_info = data_item.non_tensor_batch.get('extra_info', {})
-                if isinstance(extra_info, dict):
-                    is_ambig_sample = extra_info.get('_is_ambiguous', None)
-                    if is_ambig_sample is None:
-                        req_clari = extra_info.get('req_clari', None)
-                        if req_clari is not None:
-                            is_ambig_sample = bool(req_clari)
+                # Try ground_truth first (works in both training and validation)
+                if isinstance(ground_truth, dict):
+                    gt_req = ground_truth.get('req_clari', None)
+                    if gt_req is not None:
+                        is_ambig_sample = bool(gt_req)
+                # Fallback to extra_info (may be overwritten during rollout)
+                if is_ambig_sample is None:
+                    extra_info = data_item.non_tensor_batch.get('extra_info', {})
+                    if isinstance(extra_info, dict):
+                        is_ambig_sample = extra_info.get('_is_ambiguous', None)
+                        if is_ambig_sample is None:
+                            req_clari = extra_info.get('req_clari', None)
+                            if req_clari is not None:
+                                is_ambig_sample = bool(req_clari)
 
             # Skip IG computation for non-ambiguous questions (IG gated off)
             compute_ig = True
