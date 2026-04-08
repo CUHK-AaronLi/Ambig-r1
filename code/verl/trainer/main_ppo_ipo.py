@@ -50,7 +50,8 @@ class IPORewardManager(BaseRewardManager):
                  max_clarify_turns=3,
                  ig_threshold=0.0,
                  ambiguity_penalty=0.0,
-                 outcome_scale=1.0):
+                 outcome_scale=1.0,
+                 dcr_mode=False):
         super().__init__(tokenizer, num_examine, format_score, n_agent)
         self.alpha = alpha
         self.outcome_scale = outcome_scale
@@ -63,6 +64,86 @@ class IPORewardManager(BaseRewardManager):
         self.max_clarify_turns = max_clarify_turns
         self.ig_threshold = ig_threshold
         self.ambiguity_penalty = ambiguity_penalty
+        self.dcr_mode = dcr_mode
+
+    # ------------------------------------------------------------------
+    # Discriminative Clarification Reward (DCR)
+    # ------------------------------------------------------------------
+    def _classify_clarification(self, clarify_text: str) -> str:
+        """Classify a clarification question by type.
+
+        Returns one of: 'intent', 'parameter', 'search_like', 'follow_up', 'uncertain'
+
+        Based on case study analysis (analysis/clarification_classification.md):
+        - Intent clarification: "Are you asking X?" "Do you mean Y?"
+        - Parameter clarification: "Which year?" "What is X?" (short, WH-words)
+        - Search-like: Long questions adding specifics not in original
+        - Follow-up: Asking about conversation context
+        """
+        text = clarify_text.strip()
+        if not text:
+            return 'uncertain'
+
+        text_lower = text.lower()
+        tokens = text.split()
+        n_tokens = len(tokens)
+
+        # Intent clarification: "Are you asking X?" "Do you mean Y?"
+        if text_lower.startswith(('are you asking', 'do you mean', 'are you looking for',
+                                   'is the question', 'are you referring')):
+            return 'intent'
+
+        # Short WH-question (≤15 tokens) → likely parameter clarification
+        short_wh_starters = ('which', 'what', 'how much', 'how many', 'where', 'when', 'who')
+        if n_tokens <= 15 and any(text_lower.startswith(w) for w in short_wh_starters):
+            return 'parameter'
+
+        # Contains specific amount/number details (>2 numbers and >20 tokens) → search-like
+        number_count = len(re.findall(r'\d[\d,.]*', text))
+        if number_count > 2 and n_tokens > 20:
+            return 'search_like'
+
+        # Very long question (>40 tokens) → likely search-like (adding specifics)
+        if n_tokens > 40:
+            return 'search_like'
+
+        # Long question with proper nouns (capitalized words) → search-like
+        # Skip WH-starters — they might be legitimate
+        if n_tokens > 25:
+            # Count capitalized words that aren't at sentence start
+            caps = len(re.findall(r'(?<=[a-z]\s)[A-Z][a-z]+', text))
+            if caps >= 3:
+                return 'search_like'
+
+        # Short-to-medium clarification → likely true disambiguation
+        if n_tokens <= 25:
+            return 'parameter'
+
+        # Default: uncertain
+        return 'uncertain'
+
+    def _compute_dcr_reward(self, turn: dict) -> float:
+        """Compute Discriminative Clarification Reward for a single clarify turn.
+
+        Replaces fixed clarify_bonus with quality-aware reward.
+        - Intent/parameter clarification → full bonus
+        - Search-like clarification → 0 (no reward)
+        - Uncertain → partial (50%) bonus
+        """
+        if not self.dcr_mode:
+            return self.clarify_bonus
+
+        clarify_text = turn.get('content', '')
+        classification = self._classify_clarification(clarify_text)
+
+        if classification in ('intent', 'parameter'):
+            return self.clarify_bonus  # Full reward
+        elif classification == 'search_like':
+            return 0.0  # No reward for search-like clarification
+        elif classification == 'follow_up':
+            return 0.0  # No reward for follow-up questions
+        else:  # uncertain
+            return 0.5 * self.clarify_bonus  # Partial reward
 
     def __call__(self, data: DataProto):
         if 'rm_scores' in data.batch.keys():
@@ -160,7 +241,7 @@ class IPORewardManager(BaseRewardManager):
                         # Floor at negative cap (don't penalize too harshly)
                         ig_reward = max(ig_reward, -0.2)
                         if turn['type'] == 'clarify' and self.clarify_bonus > 0:
-                            ig_reward += self.clarify_bonus
+                            ig_reward += self._compute_dcr_reward(turn)
                         ig_details.append({
                             'type': turn['type'],
                             'delta': per_turn_ig,
@@ -178,7 +259,7 @@ class IPORewardManager(BaseRewardManager):
                         # ---- Ablation-based IG (v3 counterfactual) ----
                         ig_source = "ablation"
                         ablation_used_count += 1
-                        for turn_type, delta in sample_ablation:
+                        for j, (turn_type, delta) in enumerate(sample_ablation):
                             # Shift delta by threshold: only IG above threshold counts as positive
                             effective_delta = delta - self.ig_threshold
                             clamped_delta = max(effective_delta, -0.5)  # floor at -0.5
@@ -187,7 +268,11 @@ class IPORewardManager(BaseRewardManager):
                             # Floor at baseline (or -0.2 for negative)
                             ig_reward = max(ig_reward, min(self.baseline_reward, -0.2))
                             if turn_type == 'clarify' and self.clarify_bonus > 0:
-                                ig_reward += self.clarify_bonus
+                                # Match to intermediate_turns to get content for DCR
+                                if j < len(intermediate_turns) and intermediate_turns[j]['type'] == 'clarify':
+                                    ig_reward += self._compute_dcr_reward(intermediate_turns[j])
+                                else:
+                                    ig_reward += self.clarify_bonus  # fallback
 
                             ig_details.append({
                                 'type': turn_type,
@@ -215,7 +300,7 @@ class IPORewardManager(BaseRewardManager):
                             ig_reward = self.alpha * ig_raw * f1
                             ig_reward = max(ig_reward, self.baseline_reward)
                             if turn['type'] == 'clarify' and self.clarify_bonus > 0:
-                                ig_reward += self.clarify_bonus
+                                ig_reward += self._compute_dcr_reward(turn)
 
                             ig_details.append({
                                 'type': turn['type'],
@@ -491,6 +576,7 @@ def main_task(config):
     ig_threshold = 0.0
     ambiguity_penalty = 0.0
     outcome_scale = 1.0
+    dcr_mode = False
     if hasattr(config, 'ipo'):
         if hasattr(config.ipo, 'alpha'):
             alpha = config.ipo.alpha
@@ -514,11 +600,15 @@ def main_task(config):
             ambiguity_penalty = config.ipo.ambiguity_penalty
         if hasattr(config.ipo, 'outcome_scale'):
             outcome_scale = config.ipo.outcome_scale
+        if hasattr(config.ipo, 'dcr_mode'):
+            dcr_mode = config.ipo.dcr_mode
+        else:
+            dcr_mode = False
     print(f"[IPO] alpha={alpha}, turn_cost={turn_cost}, efficiency_bonus={efficiency_bonus}, "
           f"baseline_reward={baseline_reward}, clarify_bonus={clarify_bonus}, "
           f"counterfactual_logprob={counterfactual_logprob}, efficiency_gating={efficiency_gating}, "
           f"ig_threshold={ig_threshold}, ambiguity_penalty={ambiguity_penalty}, "
-          f"outcome_scale={outcome_scale}, n_agent={n_agent}")
+          f"outcome_scale={outcome_scale}, dcr_mode={dcr_mode}, n_agent={n_agent}")
 
     log_main("Creating IPO reward manager")
     reward_fn = IPORewardManager(
@@ -528,7 +618,7 @@ def main_task(config):
         counterfactual_logprob=counterfactual_logprob,
         efficiency_gating=efficiency_gating, max_clarify_turns=max_clarify_turns,
         ig_threshold=ig_threshold, ambiguity_penalty=ambiguity_penalty,
-        outcome_scale=outcome_scale,
+        outcome_scale=outcome_scale, dcr_mode=dcr_mode,
     )
     val_reward_fn = IPORewardManager(
         tokenizer=tokenizer, num_examine=2, n_agent=1, alpha=alpha,
@@ -537,7 +627,7 @@ def main_task(config):
         counterfactual_logprob=False,  # validation uses standard reward
         efficiency_gating=efficiency_gating, max_clarify_turns=max_clarify_turns,
         ig_threshold=ig_threshold, ambiguity_penalty=ambiguity_penalty,
-        outcome_scale=outcome_scale,
+        outcome_scale=outcome_scale, dcr_mode=False,  # validation always uses standard reward
     )
 
     log_main("Creating resource pool manager")
