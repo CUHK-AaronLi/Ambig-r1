@@ -69,7 +69,7 @@ class IPORewardManager(BaseRewardManager):
     # ------------------------------------------------------------------
     # Discriminative Clarification Reward (DCR)
     # ------------------------------------------------------------------
-    def _classify_clarification(self, clarify_text: str) -> str:
+    def _classify_clarification(self, clarify_text: str, original_question: str = '') -> str:
         """Classify a clarification question by type.
 
         Returns one of: 'intent', 'parameter', 'search_like', 'follow_up', 'uncertain'
@@ -79,6 +79,10 @@ class IPORewardManager(BaseRewardManager):
         - Parameter clarification: "Which year?" "What is X?" (short, WH-words)
         - Search-like: Long questions adding specifics not in original
         - Follow-up: Asking about conversation context
+
+        v2: If original_question is provided, uses:
+        1. Entity overlap: new named entities → search-like
+        2. Content overlap: low overlap + longer → search-like
         """
         text = clarify_text.strip()
         if not text:
@@ -94,9 +98,53 @@ class IPORewardManager(BaseRewardManager):
             return 'intent'
 
         # Short WH-question (≤15 tokens) → likely parameter clarification
-        short_wh_starters = ('which', 'what', 'how much', 'how many', 'where', 'when', 'who')
+        short_wh_starters = ('which', 'what', 'how much', 'how many', 'where', 'when', 'who',
+                             'could', 'can')
         if n_tokens <= 15 and any(text_lower.startswith(w) for w in short_wh_starters):
             return 'parameter'
+
+        # v2: Entity-overlap and content-overlap with original question
+        if original_question:
+            orig_lower = original_question.lower()
+
+            # Extract named entities (capitalized words ≥3 chars)
+            orig_entities = set(re.findall(r'[A-Z][a-z]{2,}', original_question))
+            clarify_entities = set(re.findall(r'[A-Z][a-z]{2,}', clarify_text))
+
+            # New entities in clarification that aren't in original question
+            common_words = {'The', 'What', 'Which', 'How', 'Are', 'Was', 'Were',
+                          'This', 'That', 'These', 'Those', 'And', 'For', 'From',
+                          'With', 'Not', 'Can', 'Could', 'Does', 'Did', 'Has', 'Have'}
+            new_entities = clarify_entities - orig_entities - common_words
+
+            # If clarification introduces 3+ new named entities → search-like
+            if len(new_entities) >= 3:
+                return 'search_like'
+
+            # If clarification introduces 2 new entities AND is long → search-like
+            if len(new_entities) >= 2 and n_tokens > 20:
+                return 'search_like'
+
+            # Content word overlap ratio
+            stop_words = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'in', 'on', 'at',
+                         'to', 'for', 'of', 'and', 'or', 'but', 'it', 'this', 'that',
+                         'these', 'those', 'what', 'which', 'who', 'how', 'when', 'where',
+                         'why', 'do', 'does', 'did', 'has', 'have', 'had', 'be', 'been',
+                         'being', 'not', 'no', 'its', 'his', 'her', 'their', 'my', 'your'}
+            clarify_content = set(w for w in text_lower.split() if w not in stop_words and len(w) > 2)
+            orig_content = set(w for w in orig_lower.split() if w not in stop_words and len(w) > 2)
+
+            if orig_content:
+                overlap = clarify_content & orig_content
+                overlap_ratio = len(overlap) / len(orig_content)
+
+                # Low content overlap AND clarification is longer → adding new info → search-like
+                if overlap_ratio < 0.3 and n_tokens > len(original_question.split()) * 1.5:
+                    return 'search_like'
+
+                # Medium overlap but clarification is 2x+ longer → elaborating too much
+                if overlap_ratio < 0.5 and n_tokens > len(original_question.split()) * 2.0:
+                    return 'search_like'
 
         # Contains specific amount/number details (>2 numbers and >20 tokens) → search-like
         number_count = len(re.findall(r'\d[\d,.]*', text))
@@ -108,9 +156,7 @@ class IPORewardManager(BaseRewardManager):
             return 'search_like'
 
         # Long question with proper nouns (capitalized words) → search-like
-        # Skip WH-starters — they might be legitimate
         if n_tokens > 25:
-            # Count capitalized words that aren't at sentence start
             caps = len(re.findall(r'(?<=[a-z]\s)[A-Z][a-z]+', text))
             if caps >= 3:
                 return 'search_like'
@@ -122,19 +168,21 @@ class IPORewardManager(BaseRewardManager):
         # Default: uncertain
         return 'uncertain'
 
-    def _compute_dcr_reward(self, turn: dict) -> float:
+    def _compute_dcr_reward(self, turn: dict, original_question: str = '') -> float:
         """Compute Discriminative Clarification Reward for a single clarify turn.
 
         Replaces fixed clarify_bonus with quality-aware reward.
         - Intent/parameter clarification → full bonus
         - Search-like clarification → 0 (no reward)
         - Uncertain → partial (50%) bonus
+
+        v2: Uses original question context for entity-overlap detection.
         """
         if not self.dcr_mode:
             return self.clarify_bonus
 
         clarify_text = turn.get('content', '')
-        classification = self._classify_clarification(clarify_text)
+        classification = self._classify_clarification(clarify_text, original_question)
 
         if classification in ('intent', 'parameter'):
             return self.clarify_bonus  # Full reward
@@ -203,21 +251,29 @@ class IPORewardManager(BaseRewardManager):
 
             # Ambiguity-aware IG gating: disable IG for non-ambiguous questions
             is_ambig_sample = None
-            if self.ambiguity_penalty > 0:
+            original_question = ''  # For DCR v2: entity-overlap detection
+            if self.ambiguity_penalty > 0 or self.dcr_mode:
                 # Try ground_truth first (works in both training and validation)
                 if isinstance(ground_truth, dict):
                     gt_req = ground_truth.get('req_clari', None)
                     if gt_req is not None:
                         is_ambig_sample = bool(gt_req)
                 # Fallback to extra_info (may be overwritten during rollout)
-                if is_ambig_sample is None:
-                    extra_info = data_item.non_tensor_batch.get('extra_info', {})
-                    if isinstance(extra_info, dict):
-                        is_ambig_sample = extra_info.get('_is_ambiguous', None)
+                ei = data_item.non_tensor_batch.get('extra_info', {})
+                if isinstance(ei, dict):
+                    if is_ambig_sample is None:
+                        is_ambig_sample = ei.get('_is_ambiguous', None)
                         if is_ambig_sample is None:
-                            req_clari = extra_info.get('req_clari', None)
+                            req_clari = ei.get('req_clari', None)
                             if req_clari is not None:
                                 is_ambig_sample = bool(req_clari)
+                    # Extract original question for DCR v2
+                    if self.dcr_mode:
+                        original_question = ei.get('original_question', '') or ''
+                        if not original_question:
+                            # Fallback: try ground_truth
+                            if isinstance(ground_truth, dict):
+                                original_question = ground_truth.get('ambiguous_question', '') or ground_truth.get('question', '')
 
             # Skip IG computation for non-ambiguous questions (IG gated off)
             compute_ig = True
@@ -241,7 +297,7 @@ class IPORewardManager(BaseRewardManager):
                         # Floor at negative cap (don't penalize too harshly)
                         ig_reward = max(ig_reward, -0.2)
                         if turn['type'] == 'clarify' and self.clarify_bonus > 0:
-                            ig_reward += self._compute_dcr_reward(turn)
+                            ig_reward += self._compute_dcr_reward(turn, original_question)
                         ig_details.append({
                             'type': turn['type'],
                             'delta': per_turn_ig,
@@ -270,7 +326,7 @@ class IPORewardManager(BaseRewardManager):
                             if turn_type == 'clarify' and self.clarify_bonus > 0:
                                 # Match to intermediate_turns to get content for DCR
                                 if j < len(intermediate_turns) and intermediate_turns[j]['type'] == 'clarify':
-                                    ig_reward += self._compute_dcr_reward(intermediate_turns[j])
+                                    ig_reward += self._compute_dcr_reward(intermediate_turns[j], original_question)
                                 else:
                                     ig_reward += self.clarify_bonus  # fallback
 
@@ -300,7 +356,7 @@ class IPORewardManager(BaseRewardManager):
                             ig_reward = self.alpha * ig_raw * f1
                             ig_reward = max(ig_reward, self.baseline_reward)
                             if turn['type'] == 'clarify' and self.clarify_bonus > 0:
-                                ig_reward += self._compute_dcr_reward(turn)
+                                ig_reward += self._compute_dcr_reward(turn, original_question)
 
                             ig_details.append({
                                 'type': turn['type'],
