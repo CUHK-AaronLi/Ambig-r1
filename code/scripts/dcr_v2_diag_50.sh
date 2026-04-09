@@ -1,13 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name="dcr-diag"
+#SBATCH --job-name="dcr-v2-50"
 #SBATCH --account=pgs
 #SBATCH --qos=low
 #SBATCH --partition=gemini
 #SBATCH -o out/%j-%x.out
 #SBATCH -e out/%j-%x.err
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --gpus=4
-#SBATCH --exclude=CPIIGPU-211-128
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
@@ -26,16 +25,18 @@ export DATA_DIR=scripts/data_process/data/pacific_fewshot
 export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/ar-best-200/actor/global_step_180
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_MODE=offline
-export EXPERIMENT_NAME=dcr-diag-100
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export AZURE_ENDPOINT="https://cpii-s5.openai.azure.com/"
 export AZURE_API_KEY="91e5ea9bf61c4769a44b0b0b5c67d559"
 export AZURE_DEPLOYMENT="gpt-4o"
 export AZURE_API_VERSION="2024-02-01"
 
-echo "===== DCR Diagnostic: alpha=0.3, bonus=0.15, penalty=0.15, DCR=ON (100 steps) ====="
-echo "Compared to ar-best-200 baseline: F1=0.680, clarify=33%"
-echo "Key change: clarify_bonus is now quality-aware (DCR mode)"
+echo "===== DCR v2 Diagnostic: 50 steps, no mid-training val ====="
+echo "Key changes from v1:"
+echo "  1. DCR v2: entity overlap + content overlap with original question"
+echo "  2. No validation during training (test_freq=999) — saves ~25h"
+echo "  3. Save checkpoint at step 50 for separate evaluation"
+echo "  4. 24h time limit (vs 12h for v1)"
 
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     data.train_files=$DATA_DIR/train.parquet \
@@ -75,16 +76,16 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     actor_rollout_ref.rollout.temperature=1 \
     actor_rollout_ref.actor.state_masking=true \
     +ambigqa.enable_search_action=false \
-    trainer.logger=['console','wandb'] \
+    trainer.logger=['console'] \
     +trainer.val_only=false \
-    +trainer.val_before_train=true \
+    +trainer.val_before_train=false \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
-    trainer.save_freq=20 \
-    trainer.test_freq=10 \
+    trainer.save_freq=50 \
+    trainer.test_freq=999 \
     trainer.project_name=Ambig-R1 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=100 \
+    trainer.total_training_steps=50 \
     trainer.default_hdfs_dir=null \
     trainer.num_cpus=20 \
     max_turns=4 \
@@ -106,11 +107,14 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     +ipo.ambiguity_penalty=0.15 \
     +ipo.outcome_scale=1.0 \
     +ipo.dcr_mode=true \
-    trainer.experiment_name=$EXPERIMENT_NAME \
-    trainer.default_local_dir=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/$EXPERIMENT_NAME \
-    2>&1 | tee $EXPERIMENT_NAME.log
+    trainer.experiment_name=dcr-v2-50 \
+    trainer.default_local_dir=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/dcr-v2-50 \
+    2>&1 | tee dcr-v2-50.log
 
 echo ""
-echo "===== DCR Diagnostic Results ====="
-grep -E "val/f1|val/post_clarify|val/clarify_rate|val/no_clarify|dcr" $EXPERIMENT_NAME.log | tail -30
+echo "===== DCR v2 Training Complete ====="
+echo "Checkpoint: verl_checkpoints_diag/dcr-v2-50/"
+echo ""
+echo "To evaluate, run: sbatch scripts/dcr_5ds_eval.sh (after updating checkpoint path)"
+echo ""
 echo "Job finished at: $(date)"

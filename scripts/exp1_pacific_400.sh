@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name="dcr-diag"
+#SBATCH --job-name="exp1-p400"
 #SBATCH --account=pgs
 #SBATCH --qos=low
 #SBATCH --partition=gemini
 #SBATCH -o out/%j-%x.out
 #SBATCH -e out/%j-%x.err
-#SBATCH --time=12:00:00
+#SBATCH --time=48:00:00
 #SBATCH --gpus=4
 #SBATCH --exclude=CPIIGPU-211-128
 #SBATCH --nodes=1
@@ -15,6 +15,8 @@
 hostname
 echo "Job started at: $(date)"
 echo "Job ID: $SLURM_JOB_ID"
+echo "===== EXP1: PACIFIC continuation from step 180 -> 400 (220 more steps) ====="
+echo "Peak was F1=0.690 at step 190, testing if more training helps"
 
 source ~/anaconda3/bin/activate
 eval "$(conda shell.bash hook)"
@@ -26,16 +28,17 @@ export DATA_DIR=scripts/data_process/data/pacific_fewshot
 export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/ar-best-200/actor/global_step_180
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_MODE=offline
-export EXPERIMENT_NAME=dcr-diag-100
+export EXPERIMENT_NAME=exp1-pacific-400
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export AZURE_ENDPOINT="https://cpii-s5.openai.azure.com/"
 export AZURE_API_KEY="91e5ea9bf61c4769a44b0b0b5c67d559"
 export AZURE_DEPLOYMENT="gpt-4o"
 export AZURE_API_VERSION="2024-02-01"
 
-echo "===== DCR Diagnostic: alpha=0.3, bonus=0.15, penalty=0.15, DCR=ON (100 steps) ====="
-echo "Compared to ar-best-200 baseline: F1=0.680, clarify=33%"
-echo "Key change: clarify_bonus is now quality-aware (DCR mode)"
+if [ ! -d "$BASE_MODEL" ]; then
+    echo "ERROR: Checkpoint not found at $BASE_MODEL"
+    exit 1
+fi
 
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     data.train_files=$DATA_DIR/train.parquet \
@@ -84,7 +87,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     trainer.test_freq=10 \
     trainer.project_name=Ambig-R1 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=100 \
+    trainer.total_training_steps=220 \
     trainer.default_hdfs_dir=null \
     trainer.num_cpus=20 \
     max_turns=4 \
@@ -105,12 +108,11 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     +ipo.ig_threshold=0.0 \
     +ipo.ambiguity_penalty=0.15 \
     +ipo.outcome_scale=1.0 \
-    +ipo.dcr_mode=true \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.default_local_dir=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/$EXPERIMENT_NAME \
     2>&1 | tee $EXPERIMENT_NAME.log
 
 echo ""
-echo "===== DCR Diagnostic Results ====="
-grep -E "val/f1|val/post_clarify|val/clarify_rate|val/no_clarify|dcr" $EXPERIMENT_NAME.log | tail -30
+echo "===== EXP1 Results ====="
+grep -E "val/f1|val/clarify_rate|val/test_score" $EXPERIMENT_NAME.log | tail -20
 echo "Job finished at: $(date)"

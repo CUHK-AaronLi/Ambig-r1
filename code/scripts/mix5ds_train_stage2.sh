@@ -1,19 +1,19 @@
 #!/bin/bash
-#SBATCH --job-name="dcr-diag"
+#SBATCH --job-name="mix5ds-stage2"
 #SBATCH --account=pgs
 #SBATCH --qos=low
 #SBATCH --partition=gemini
 #SBATCH -o out/%j-%x.out
 #SBATCH -e out/%j-%x.err
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --gpus=4
-#SBATCH --exclude=CPIIGPU-211-128
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
 
 hostname
-echo "Job started at: $(date)"
+echo "===== Mix-5ds Stage 2 Training ====="
+echo "Started at: $(date)"
 echo "Job ID: $SLURM_JOB_ID"
 
 source ~/anaconda3/bin/activate
@@ -22,24 +22,23 @@ conda activate searchr1
 cd /mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code
 mkdir -p out
 
-export DATA_DIR=scripts/data_process/data/pacific_fewshot
+# Start from ar-best-200 (PACIFIC-trained, 180 steps)
 export BASE_MODEL=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/ar-best-200/actor/global_step_180
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_MODE=offline
-export EXPERIMENT_NAME=dcr-diag-100
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export AZURE_ENDPOINT="https://cpii-s5.openai.azure.com/"
 export AZURE_API_KEY="91e5ea9bf61c4769a44b0b0b5c67d559"
 export AZURE_DEPLOYMENT="gpt-4o"
 export AZURE_API_VERSION="2024-02-01"
 
-echo "===== DCR Diagnostic: alpha=0.3, bonus=0.15, penalty=0.15, DCR=ON (100 steps) ====="
-echo "Compared to ar-best-200 baseline: F1=0.680, clarify=33%"
-echo "Key change: clarify_bonus is now quality-aware (DCR mode)"
+echo "Base model: $BASE_MODEL"
+echo "Training data: mix_5ds (2500 examples from 5 datasets)"
+echo "Expected: Model learns to adapt clarification strategy per dataset"
 
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
-    data.train_files=$DATA_DIR/train.parquet \
-    data.val_files=$DATA_DIR/validation.parquet \
+    data.train_files=scripts/data_process/data/mix_5ds/train.parquet \
+    data.val_files="scripts/data_process/data/mix_5ds/val_pacific.parquet" \
     data.train_data_num=null \
     data.val_data_num=100 \
     data.train_batch_size=32 \
@@ -75,16 +74,16 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     actor_rollout_ref.rollout.temperature=1 \
     actor_rollout_ref.actor.state_masking=true \
     +ambigqa.enable_search_action=false \
-    trainer.logger=['console','wandb'] \
+    trainer.logger=['console'] \
     +trainer.val_only=false \
-    +trainer.val_before_train=true \
+    +trainer.val_before_train=false \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
-    trainer.save_freq=20 \
-    trainer.test_freq=10 \
+    trainer.save_freq=50 \
+    trainer.test_freq=25 \
     trainer.project_name=Ambig-R1 \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=100 \
+    trainer.total_training_steps=200 \
     trainer.default_hdfs_dir=null \
     trainer.num_cpus=20 \
     max_turns=4 \
@@ -106,11 +105,10 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
     +ipo.ambiguity_penalty=0.15 \
     +ipo.outcome_scale=1.0 \
     +ipo.dcr_mode=true \
-    trainer.experiment_name=$EXPERIMENT_NAME \
-    trainer.default_local_dir=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/$EXPERIMENT_NAME \
-    2>&1 | tee $EXPERIMENT_NAME.log
+    trainer.experiment_name=mix5ds-stage2 \
+    trainer.default_local_dir=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/mix5ds-stage2 \
+    2>&1 | tee mix5ds-stage2.log
 
 echo ""
-echo "===== DCR Diagnostic Results ====="
-grep -E "val/f1|val/post_clarify|val/clarify_rate|val/no_clarify|dcr" $EXPERIMENT_NAME.log | tail -30
-echo "Job finished at: $(date)"
+echo "===== Mix-5ds Stage 2 Complete ====="
+echo "Done at: $(date)"
