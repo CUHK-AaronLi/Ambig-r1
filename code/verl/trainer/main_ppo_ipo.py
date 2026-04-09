@@ -51,7 +51,8 @@ class IPORewardManager(BaseRewardManager):
                  ig_threshold=0.0,
                  ambiguity_penalty=0.0,
                  outcome_scale=1.0,
-                 dcr_mode=False):
+                 dcr_mode=False,
+                 atcc_mode=False):
         super().__init__(tokenizer, num_examine, format_score, n_agent)
         self.alpha = alpha
         self.outcome_scale = outcome_scale
@@ -65,6 +66,7 @@ class IPORewardManager(BaseRewardManager):
         self.ig_threshold = ig_threshold
         self.ambiguity_penalty = ambiguity_penalty
         self.dcr_mode = dcr_mode
+        self.atcc_mode = atcc_mode  # ATCC: ambiguity-type conditioned clarify_bonus
 
     # ------------------------------------------------------------------
     # Discriminative Clarification Reward (DCR)
@@ -193,6 +195,133 @@ class IPORewardManager(BaseRewardManager):
         else:  # uncertain
             return 0.5 * self.clarify_bonus  # Partial reward
 
+    # ------------------------------------------------------------------
+    # ATCC: Ambiguity-Type Conditioned Clarification
+    # ------------------------------------------------------------------
+    def _classify_ambig_type(self, original_question: str) -> str:
+        """Classify the original question's ambiguity type.
+
+        ATCC: Ambiguity-Type Conditioned Clarification
+
+        - PARAMETER: "Which year?" "How much?" → clarify helps
+        - RULES: "Can I file under Chapter 9?" → clarify helps
+        - SCOPE: "What happened after?" → clarify helps
+        - FACTUAL: "Who announced?" "When did X happen?" → clarify hurts
+        - INTERPRETIVE: "Is this ethical?" → clarify hurts
+        - UNKNOWN: → conservative (50% bonus)
+        """
+        if not original_question:
+            return 'UNKNOWN'
+
+        q_lower = original_question.lower()
+        tokens = original_question.split()
+        n = len(tokens)
+
+        # 1. PARAMETER: asking for specific values/parameters
+        param_patterns = [
+            'which year', 'what year', 'how much', 'how many',
+            'which company', 'which segment', 'what percentage',
+            'which quarter', 'what is the value', 'in 201', 'in 202',
+            'what is the total', 'what was the amount', 'how many of',
+            'what is the balance', 'what was the revenue',
+            'what is the change', 'what percentage of',
+            'what was the percentage', 'what does the',
+        ]
+        if any(p in q_lower for p in param_patterns):
+            return 'PARAMETER'
+
+        # 2. RULES: legal/rule-following questions
+        rule_patterns = [
+            'chapter', 'can i', 'can someone', 'can the', 'can a',
+            'do i', 'do you', 'does the', 'do the',
+            'is the user', 'the user is', 'filing under',
+            'applicable if', 'only if', 'provided that',
+            'following conditions', 'eligible for', 'qualify for',
+            'requirement', 'must i', 'must the',
+        ]
+        if any(p in q_lower for p in rule_patterns):
+            return 'RULES'
+
+        # 3. SCOPE: temporal/spatial scope
+        scope_patterns = [
+            'after ', 'before ', 'during ', 'between ',
+            'from the period', 'in the period', 'over the period',
+            'what happened after', 'what happened before',
+        ]
+        if any(p in q_lower for p in scope_patterns):
+            return 'SCOPE'
+
+        # 4. FACTUAL: asking for specific facts/sources/names
+        factual_patterns = [
+            'who announced', 'who said', 'who reported',
+            'who is the', 'who was the', 'who were the',
+            'when was the', 'when did the', 'when did x',
+            'what year was', 'what happened when',
+            'what did x say', 'who founded', 'who created',
+            'who won', 'who played', 'who wrote',
+        ]
+        if any(p in q_lower for p in factual_patterns):
+            return 'FACTUAL'
+
+        # 5. Short questions starting with who/what/where/when → likely FACTUAL
+        if n <= 10 and q_lower.startswith(('who', 'what', 'where', 'when', 'how')):
+            return 'FACTUAL'
+
+        # 6. INTERPRETIVE: subjective/judgment questions
+        interpret_patterns = [
+            'is this good', 'is it right', 'is it better',
+            'is it ethical', 'is this ethical', 'is it appropriate',
+            'should it be', 'is this the best', 'is it worth',
+            'is really good', 'is it helpful', 'is it effective',
+        ]
+        if any(p in q_lower for p in interpret_patterns):
+            return 'INTERPRETIVE'
+
+        return 'UNKNOWN'
+
+    def _compute_atcc_bonus(self, original_question: str) -> float:
+        """Compute ATCC clarification bonus based on ambiguity type.
+
+        ATCC: Ambiguity-Type Conditioned Clarification
+
+        - PARAMETER/RULES/SCOPE: full bonus (clarification helps)
+        - FACTUAL/INTERPRETIVE: 0 bonus (clarification hurts)
+        - UNKNOWN: 50% bonus (conservative)
+        """
+        if not self.atcc_mode:
+            return self.clarify_bonus
+
+        ambig_type = self._classify_ambig_type(original_question)
+
+        if ambig_type in ('PARAMETER', 'RULES', 'SCOPE'):
+            return self.clarify_bonus  # Full reward
+        elif ambig_type in ('FACTUAL', 'INTERPRETIVE'):
+            return 0.0  # No reward for clarification on these types
+        else:  # UNKNOWN
+            return 0.5 * self.clarify_bonus  # Conservative
+
+    def _compute_clarify_reward(self, turn: dict, original_question: str) -> float:
+        """Compute clarification reward combining ATCC + DCR.
+
+        Priority:
+        1. ATCC (if enabled): zero bonus for FACTUAL/INTERPRETIVE questions
+        2. DCR (if enabled): further filter by clarification quality
+        3. Fixed bonus fallback
+        """
+        if self.atcc_mode:
+            atcc_bonus = self._compute_atcc_bonus(original_question)
+            if atcc_bonus == 0.0:
+                return 0.0  # No bonus for FACTUAL/INTERPRETIVE questions
+            # ATCC gave partial/full bonus → apply DCR as quality filter
+            if self.dcr_mode:
+                dcr_bonus = self._compute_dcr_reward(turn, original_question)
+                return min(atcc_bonus, dcr_bonus)  # More conservative
+            return atcc_bonus
+        elif self.dcr_mode:
+            return self._compute_dcr_reward(turn, original_question)
+        else:
+            return self.clarify_bonus
+
     def __call__(self, data: DataProto):
         if 'rm_scores' in data.batch.keys():
             return data.batch['rm_scores']
@@ -297,7 +426,7 @@ class IPORewardManager(BaseRewardManager):
                         # Floor at negative cap (don't penalize too harshly)
                         ig_reward = max(ig_reward, -0.2)
                         if turn['type'] == 'clarify' and self.clarify_bonus > 0:
-                            ig_reward += self._compute_dcr_reward(turn, original_question)
+                            ig_reward += self._compute_clarify_reward(turn, original_question)
                         ig_details.append({
                             'type': turn['type'],
                             'delta': per_turn_ig,
@@ -324,11 +453,11 @@ class IPORewardManager(BaseRewardManager):
                             # Floor at baseline (or -0.2 for negative)
                             ig_reward = max(ig_reward, min(self.baseline_reward, -0.2))
                             if turn_type == 'clarify' and self.clarify_bonus > 0:
-                                # Match to intermediate_turns to get content for DCR
+                                # Match to intermediate_turns to get content for DCR/ATCC
                                 if j < len(intermediate_turns) and intermediate_turns[j]['type'] == 'clarify':
-                                    ig_reward += self._compute_dcr_reward(intermediate_turns[j], original_question)
+                                    ig_reward += self._compute_clarify_reward(intermediate_turns[j], original_question)
                                 else:
-                                    ig_reward += self.clarify_bonus  # fallback
+                                    ig_reward += self._compute_clarify_reward({}, original_question)  # ATCC fallback
 
                             ig_details.append({
                                 'type': turn_type,
@@ -356,7 +485,7 @@ class IPORewardManager(BaseRewardManager):
                             ig_reward = self.alpha * ig_raw * f1
                             ig_reward = max(ig_reward, self.baseline_reward)
                             if turn['type'] == 'clarify' and self.clarify_bonus > 0:
-                                ig_reward += self._compute_dcr_reward(turn, original_question)
+                                ig_reward += self._compute_clarify_reward(turn, original_question)
 
                             ig_details.append({
                                 'type': turn['type'],
@@ -660,11 +789,15 @@ def main_task(config):
             dcr_mode = config.ipo.dcr_mode
         else:
             dcr_mode = False
+        if hasattr(config.ipo, 'atcc_mode'):
+            atcc_mode = config.ipo.atcc_mode
+        else:
+            atcc_mode = False
     print(f"[IPO] alpha={alpha}, turn_cost={turn_cost}, efficiency_bonus={efficiency_bonus}, "
           f"baseline_reward={baseline_reward}, clarify_bonus={clarify_bonus}, "
           f"counterfactual_logprob={counterfactual_logprob}, efficiency_gating={efficiency_gating}, "
           f"ig_threshold={ig_threshold}, ambiguity_penalty={ambiguity_penalty}, "
-          f"outcome_scale={outcome_scale}, dcr_mode={dcr_mode}, n_agent={n_agent}")
+          f"outcome_scale={outcome_scale}, dcr_mode={dcr_mode}, atcc_mode={atcc_mode}, n_agent={n_agent}")
 
     log_main("Creating IPO reward manager")
     reward_fn = IPORewardManager(
@@ -674,7 +807,7 @@ def main_task(config):
         counterfactual_logprob=counterfactual_logprob,
         efficiency_gating=efficiency_gating, max_clarify_turns=max_clarify_turns,
         ig_threshold=ig_threshold, ambiguity_penalty=ambiguity_penalty,
-        outcome_scale=outcome_scale, dcr_mode=dcr_mode,
+        outcome_scale=outcome_scale, dcr_mode=dcr_mode, atcc_mode=atcc_mode,
     )
     val_reward_fn = IPORewardManager(
         tokenizer=tokenizer, num_examine=2, n_agent=1, alpha=alpha,
@@ -684,6 +817,7 @@ def main_task(config):
         efficiency_gating=efficiency_gating, max_clarify_turns=max_clarify_turns,
         ig_threshold=ig_threshold, ambiguity_penalty=ambiguity_penalty,
         outcome_scale=outcome_scale, dcr_mode=False,  # validation always uses standard reward
+        atcc_mode=False,
     )
 
     log_main("Creating resource pool manager")
