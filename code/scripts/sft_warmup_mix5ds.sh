@@ -28,7 +28,7 @@ cd /mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code
 
 export WANDB_PROJECT='Ambig-R1'
 # Start from Qwen2.5-3B-Instruct (same as the original SFT warmup)
-export BASE_MODEL="$HOME/.cache/huggingface/hub/models--Qwen--Qwen2.5-3B-Instruct/snapshots/bf9ad5a82b96ab3fbc9c86e9d9a2fb4d7b9e95ce"
+export BASE_MODEL="Qwen/Qwen2.5-3B-Instruct"
 export EXPERIMENT_NAME=sft-mix5ds-qwen3-4b
 export WANDB_MODE=offline
 
@@ -42,8 +42,8 @@ echo "Expected: ~50% clarify, ~50% answer from 5 datasets"
 # First: generate SFT data
 echo ""
 echo "===== Step 1: Generate SFT data ====="
-python3 scripts/prepare_sft_mix5ds.py \
-    --input_parquet scripts/data_process/data/mix_5ds/train.parquet \
+python3 ~/Ambig-R1-new/code/scripts/prepare_sft_mix5ds.py \
+    --input_parquet ~/Ambig-R1-new-claude/code/scripts/data_process/data/mix_5ds/train.parquet \
     --output_dir "$SFT_DATA_DIR" \
     --n_per_dataset 400 \
     --seed 42 \
