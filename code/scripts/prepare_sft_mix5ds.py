@@ -284,10 +284,16 @@ def process_situatedqa(df, n_samples=500, seed=42):
         ei = row['extra_info']
         gold_q = ei.get('gold_question', '') or ''
         original_q = ei.get('original_question', '') or gold_q
-        gold_answers = row.get('golden_answers', []) or []
-        gold_a = gold_answers[0] if gold_answers else row.get('golden_answers', 'N/A')
-        if hasattr(gold_a, 'tolist'):
-            gold_a = gold_a[0] if gold_a else 'N/A'
+        gold_answers = row.get('golden_answers', [])
+        if gold_answers is None:
+            gold_a = 'N/A'
+        elif hasattr(gold_answers, 'tolist'):
+            lst = gold_answers.tolist()
+            gold_a = lst[0] if lst else 'N/A'
+        elif isinstance(gold_answers, (list, tuple)):
+            gold_a = gold_answers[0] if gold_answers else 'N/A'
+        else:
+            gold_a = str(gold_answers)
         ambig_type = ei.get('ambiguity_type', '') or ''
 
         if not gold_a or gold_a == 'N/A' or not gold_q:
