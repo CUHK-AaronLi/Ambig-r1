@@ -91,11 +91,19 @@ def make_answer_response(gold_answer):
 
 def extract_gold_answer(reward_model):
     """Extract gold answer from reward_model field."""
-    gt = reward_model.get('ground_truth', {}) if isinstance(reward_model, dict) else {}
-    target = gt.get('target', ['N/A'])
-    if hasattr(target, 'tolist'):
-        target = target.tolist()
-    return target[0] if target and target[0] else 'N/A'
+    gt = reward_model.get('ground_truth', {})
+    if gt is None:
+        return 'N/A'
+    if hasattr(gt, 'tolist'):
+        gt = gt.tolist()
+    if isinstance(gt, (list, tuple)):
+        return gt[0] if gt else 'N/A'
+    if isinstance(gt, dict):
+        target = gt.get('target', ['N/A'])
+        if hasattr(target, 'tolist'):
+            target = target.tolist()
+        return target[0] if target and target[0] else 'N/A'
+    return str(gt) if gt else 'N/A'
 
 
 def process_pacific(df, n_samples=400, seed=42):
@@ -240,7 +248,11 @@ def process_ambignq(df, n_samples=500, seed=42):
         is_ambig = row.get('_is_ambiguous', False)
         gold_q = row.get('gold_question', '') or row.get('question', '') or ''
         original_q = row.get('question', '') or gold_q
-        gold_answers = row.get('golden_answers', []) or []
+        gold_answers = row.get('golden_answers', [])
+        if gold_answers is None:
+            gold_answers = []
+        if hasattr(gold_answers, 'tolist'):
+            gold_answers = gold_answers.tolist()
         gold_a = gold_answers[0] if gold_answers else 'N/A'
 
         if not gold_a or gold_a == 'N/A' or not gold_q:
