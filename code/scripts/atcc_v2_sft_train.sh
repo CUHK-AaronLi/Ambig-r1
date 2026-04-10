@@ -1,0 +1,120 @@
+#!/bin/bash
+#SBATCH --job-name="atcc-v2-sft"
+#SBATCH --account=pgs
+#SBATCH --qos=low
+#SBATCH --partition=gemini
+#SBATCH -o out/%j-%x.out
+#SBATCH -e out/%j-%x.err
+#SBATCH --time=24:00:00
+#SBATCH --gpus=4
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+
+hostname
+echo "===== ATCC v2 + SFT warmup: From scratch with mixed 5ds SFT ====="
+echo "Started at: $(date)"
+echo "Job ID: $SLURM_JOB_ID"
+
+source ~/anaconda3/bin/activate
+eval "$(conda shell.bash hook)"
+conda activate searchr1
+cd /mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code
+mkdir -p out
+
+# Use SFT warmup checkpoint (trained on mix5ds SFT data)
+# NOTE: change this to the actual checkpoint after SFT warmup completes
+SFT_CKPT_DIR=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints/sft-mix5ds-qwen3-4b/actor
+LATEST_CKPT=$(ls -td ${SFT_CKPT_DIR}/global_step_* 2>/dev/null | head -1)
+export BASE_MODEL=${LATEST_CKPT:-/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/ar-best-200/actor/global_step_180}
+
+export VLLM_ATTENTION_BACKEND=XFORMERS
+export WANDB_MODE=offline
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export AZURE_ENDPOINT="https://cpii-s5.openai.azure.com/"
+export AZURE_API_KEY="91e5ea9bf61c4769a44b0b0b5c67d559"
+export AZURE_DEPLOYMENT="gpt-4o"
+export AZURE_API_VERSION="2024-02-01"
+
+echo "Base model: $BASE_MODEL"
+echo "Expected SFT checkpoint: $LATEST_CKPT"
+echo "Fallback: ar-best-200 if SFT not ready"
+
+PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo_ipo \
+    data.train_files=scripts/data_process/data/mix_5ds/train.parquet \
+    data.val_files=scripts/data_process/data/pacific_fewshot/validation.parquet \
+    data.train_data_num=null \
+    data.val_data_num=100 \
+    data.train_batch_size=32 \
+    data.val_batch_size=32 \
+    data.max_prompt_length=8192 \
+    data.max_response_length=2048 \
+    data.max_start_length=3072 \
+    data.max_obs_length=512 \
+    data.shuffle_train_dataloader=True \
+    algorithm.adv_estimator=grpo \
+    actor_rollout_ref.model.path=$BASE_MODEL \
+    actor_rollout_ref.model.enable_gradient_checkpointing=true \
+    actor_rollout_ref.model.use_remove_padding=False \
+    actor_rollout_ref.actor.optim.lr=5e-7 \
+    actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.1 \
+    actor_rollout_ref.actor.use_kl_loss=true \
+    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_micro_batch_size=8 \
+    actor_rollout_ref.actor.grad_clip=1.0 \
+    actor_rollout_ref.actor.fsdp_config.param_offload=false \
+    actor_rollout_ref.actor.fsdp_config.grad_offload=false \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=false \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size=16 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size=16 \
+    actor_rollout_ref.ref.fsdp_config.param_offload=False \
+    actor_rollout_ref.actor.kl_loss_coef=0.04 \
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+    algorithm.no_think_rl=false \
+    actor_rollout_ref.rollout.n_agent=5 \
+    actor_rollout_ref.rollout.temperature=1 \
+    actor_rollout_ref.actor.state_masking=true \
+    +ambigqa.enable_search_action=false \
+    trainer.logger=['console'] \
+    +trainer.val_only=false \
+    +trainer.val_before_train=false \
+    trainer.n_gpus_per_node=4 \
+    trainer.nnodes=1 \
+    trainer.save_freq=50 \
+    trainer.test_freq=25 \
+    trainer.project_name=Ambig-R1 \
+    trainer.total_epochs=1 \
+    trainer.total_training_steps=200 \
+    trainer.default_hdfs_dir=null \
+    trainer.num_cpus=20 \
+    max_turns=4 \
+    +ambigqa.enable_clarify_action=true \
+    +ambigqa.max_clarify_turns=3 \
+    +ambigqa.gpt4_simulator_url="http://10.10.211.118:8001/batch_generate" \
+    +ambigqa.azure_openai_endpoint="https://cpii-s5.openai.azure.com/" \
+    +ambigqa.azure_openai_api_key="91e5ea9bf61c4769a44b0b0b5c67d559" \
+    +ambigqa.azure_openai_deployment="gpt-4o" \
+    +ambigqa.enable_entropy=false \
+    +ipo.alpha=0.3 \
+    +ipo.turn_cost=0.0 \
+    +ipo.enable_ablation=true \
+    +ipo.counterfactual_logprob=false \
+    +ipo.efficiency_bonus=0.0 \
+    +ipo.baseline_reward=0.0 \
+    +ipo.clarify_bonus=0.15 \
+    +ipo.ig_threshold=0.0 \
+    +ipo.ambiguity_penalty=0.15 \
+    +ipo.outcome_scale=1.0 \
+    +ipo.dcr_mode=true \
+    +ipo.atcc_mode=true \
+    +ipo.factual_clarify_penalty=-0.10 \
+    trainer.experiment_name=atcc-v2-sft \
+    trainer.default_local_dir=/mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code/verl_checkpoints_diag/atcc-v2-sft \
+    2>&1 | tee atcc-v2-sft.log
+
+echo ""
+echo "===== ATCC v2 + SFT Complete ====="
+echo "Done at: $(date)"

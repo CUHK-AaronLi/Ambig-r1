@@ -45,7 +45,7 @@ class IPORewardManager(BaseRewardManager):
                  efficiency_bonus=EFFICIENCY_BONUS,
                  baseline_reward=BASELINE_REWARD,
                  clarify_bonus=0.0,
-                 counterfactual_logprob=False,
+                 factual_clarify_penalty=-0.10,
                  efficiency_gating=False,
                  max_clarify_turns=3,
                  ig_threshold=0.0,
@@ -67,6 +67,7 @@ class IPORewardManager(BaseRewardManager):
         self.ambiguity_penalty = ambiguity_penalty
         self.dcr_mode = dcr_mode
         self.atcc_mode = atcc_mode  # ATCC: ambiguity-type conditioned clarify_bonus
+        self.factual_clarify_penalty = factual_clarify_penalty  # -0.10 → penalize clarify on FACTUAL
 
     # ------------------------------------------------------------------
     # Discriminative Clarification Reward (DCR)
@@ -301,22 +302,31 @@ class IPORewardManager(BaseRewardManager):
             return 0.5 * self.clarify_bonus  # Conservative
 
     def _compute_clarify_reward(self, turn: dict, original_question: str) -> float:
-        """Compute clarification reward combining ATCC + DCR.
+        """Compute clarification reward combining ATCC + DCR + negative penalty.
 
         Priority:
-        1. ATCC (if enabled): zero bonus for FACTUAL/INTERPRETIVE questions
+        1. ATCC (if enabled): full bonus for PARAMETER/RULES/SCOPE, NEGATIVE penalty for FACTUAL
         2. DCR (if enabled): further filter by clarification quality
         3. Fixed bonus fallback
+
+        Key insight: "no bonus" is not enough to deter FACTUAL clarification.
+        We need an active NEGATIVE penalty to overcome PACIFIC-trained habit.
         """
         if self.atcc_mode:
-            atcc_bonus = self._compute_atcc_bonus(original_question)
-            if atcc_bonus == 0.0:
-                return 0.0  # No bonus for FACTUAL/INTERPRETIVE questions
-            # ATCC gave partial/full bonus → apply DCR as quality filter
-            if self.dcr_mode:
-                dcr_bonus = self._compute_dcr_reward(turn, original_question)
-                return min(atcc_bonus, dcr_bonus)  # More conservative
-            return atcc_bonus
+            ambig_type = self._classify_ambig_type(original_question)
+            did_clarify = (turn.get('type') == 'clarify') or bool(turn.get('content', ''))
+
+            if ambig_type in ('FACTUAL', 'INTERPRETIVE'):
+                # ACTIVE PENALTY: discourage clarifying on FACTUAL questions
+                return self.factual_clarify_penalty
+            elif ambig_type in ('PARAMETER', 'RULES', 'SCOPE'):
+                atcc_bonus = self.clarify_bonus  # Full reward
+                if self.dcr_mode:
+                    dcr_bonus = self._compute_dcr_reward(turn, original_question)
+                    return min(atcc_bonus, dcr_bonus)
+                return atcc_bonus
+            else:  # UNKNOWN
+                return 0.5 * self.clarify_bonus  # Conservative
         elif self.dcr_mode:
             return self._compute_dcr_reward(turn, original_question)
         else:
@@ -773,6 +783,9 @@ def main_task(config):
             baseline_reward = config.ipo.baseline_reward
         if hasattr(config.ipo, 'clarify_bonus'):
             clarify_bonus = config.ipo.clarify_bonus
+        factual_clarify_penalty = -0.10  # Default: penalize clarify on FACTUAL
+        if hasattr(config.ipo, 'factual_clarify_penalty'):
+            factual_clarify_penalty = config.ipo.factual_clarify_penalty
         if hasattr(config.ipo, 'counterfactual_logprob'):
             counterfactual_logprob = config.ipo.counterfactual_logprob
         if hasattr(config.ipo, 'efficiency_gating'):
@@ -795,6 +808,7 @@ def main_task(config):
             atcc_mode = False
     print(f"[IPO] alpha={alpha}, turn_cost={turn_cost}, efficiency_bonus={efficiency_bonus}, "
           f"baseline_reward={baseline_reward}, clarify_bonus={clarify_bonus}, "
+          f"factual_penalty={factual_clarify_penalty}, "
           f"counterfactual_logprob={counterfactual_logprob}, efficiency_gating={efficiency_gating}, "
           f"ig_threshold={ig_threshold}, ambiguity_penalty={ambiguity_penalty}, "
           f"outcome_scale={outcome_scale}, dcr_mode={dcr_mode}, atcc_mode={atcc_mode}, n_agent={n_agent}")
@@ -804,6 +818,7 @@ def main_task(config):
         tokenizer=tokenizer, num_examine=1, n_agent=n_agent, alpha=alpha,
         turn_cost=turn_cost, efficiency_bonus=efficiency_bonus,
         baseline_reward=baseline_reward, clarify_bonus=clarify_bonus,
+        factual_clarify_penalty=factual_clarify_penalty,
         counterfactual_logprob=counterfactual_logprob,
         efficiency_gating=efficiency_gating, max_clarify_turns=max_clarify_turns,
         ig_threshold=ig_threshold, ambiguity_penalty=ambiguity_penalty,
@@ -813,6 +828,7 @@ def main_task(config):
         tokenizer=tokenizer, num_examine=2, n_agent=1, alpha=alpha,
         turn_cost=turn_cost, efficiency_bonus=efficiency_bonus,
         baseline_reward=baseline_reward, clarify_bonus=clarify_bonus,
+        factual_clarify_penalty=factual_clarify_penalty,
         counterfactual_logprob=False,  # validation uses standard reward
         efficiency_gating=efficiency_gating, max_clarify_turns=max_clarify_turns,
         ig_threshold=ig_threshold, ambiguity_penalty=ambiguity_penalty,
