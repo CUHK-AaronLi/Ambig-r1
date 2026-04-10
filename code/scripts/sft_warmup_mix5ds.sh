@@ -21,8 +21,8 @@ mkdir -p out
 source ~/anaconda3/bin/activate
 eval "$(conda shell.bash hook)"
 conda activate searchr1
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
+unset HF_HUB_OFFLINE
+unset TRANSFORMERS_OFFLINE
 
 cd /mnt/users_home/cpii.local/yli/Ambig-R1-new-claude/code
 
