@@ -294,6 +294,9 @@ def process_situatedqa(df, n_samples=500, seed=42):
             gold_a = gold_answers[0] if gold_answers else 'N/A'
         else:
             gold_a = str(gold_answers)
+        # Fallback to reward_model if golden_answers is empty
+        if gold_a == 'N/A' or gold_a is None:
+            gold_a = extract_gold_answer(row.get('reward_model', {}))
         ambig_type = ei.get('ambiguity_type', '') or ''
 
         if not gold_a or gold_a == 'N/A' or not gold_q:
