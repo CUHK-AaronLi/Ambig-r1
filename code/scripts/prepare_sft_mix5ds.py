@@ -177,9 +177,19 @@ def process_abgcoqa(df, n_samples=500, seed=42):
         is_ambig = ei.get('ambiguity') == 'ambiguous'
         gold_q = ei.get('gold_question', '') or ''
         original_q = ei.get('original_question', '') or gold_q
-        target_turn = ei.get('target_turn', {}) or {}
+        target_turn = ei.get('target_turn', {})
+        if target_turn is None:
+            target_turn = {}
+        if hasattr(target_turn, 'tolist'):
+            target_turn = target_turn.tolist()
+        if hasattr(target_turn, 'item'):
+            target_turn = target_turn.item()
         gold_a = target_turn.get('answer', 'N/A') if isinstance(target_turn, dict) else 'N/A'
-        history = ei.get('history_turns', []) or []
+        history = ei.get('history_turns', [])
+        if history is None:
+            history = []
+        if hasattr(history, 'tolist'):
+            history = history.tolist()
         ctx = ei.get('user_simulator_context', '') or ''
 
         if not gold_a or gold_a == 'N/A' or not gold_q:
