@@ -45,14 +45,22 @@ class IPORewardManager(BaseRewardManager):
                  efficiency_bonus=EFFICIENCY_BONUS,
                  baseline_reward=BASELINE_REWARD,
                  clarify_bonus=0.0,
-                 factual_clarify_penalty=-0.10,
+                 counterfactual_logprob=False,
                  efficiency_gating=False,
                  max_clarify_turns=3,
                  ig_threshold=0.0,
                  ambiguity_penalty=0.0,
                  outcome_scale=1.0,
                  dcr_mode=False,
-                 atcc_mode=False):
+                 atcc_mode=False,
+                 use_f1_gating=True,
+                 coverage_reward_mode=False,
+                 counterfactual_gating=False,
+                 hindsight_gating=False,
+                 factual_clarify_penalty=-0.15,
+                 ig_zero_mean=False,
+                 conditional_bonus=False,
+                 asymmetric_bonus=False):
         super().__init__(tokenizer, num_examine, format_score, n_agent)
         self.alpha = alpha
         self.outcome_scale = outcome_scale
@@ -67,7 +75,73 @@ class IPORewardManager(BaseRewardManager):
         self.ambiguity_penalty = ambiguity_penalty
         self.dcr_mode = dcr_mode
         self.atcc_mode = atcc_mode  # ATCC: ambiguity-type conditioned clarify_bonus
-        self.factual_clarify_penalty = factual_clarify_penalty  # -0.10 → penalize clarify on FACTUAL
+        self.use_f1_gating = use_f1_gating  # False = per-turn IG not × F1 (true process reward)
+        self.coverage_reward_mode = coverage_reward_mode  # IntentionGym: per-detail coverage reward
+        self.counterfactual_gating = counterfactual_gating  # OCIG-CF: negative IG delta -> penalty
+        self.hindsight_gating = hindsight_gating  # OCIG-HOG: F1 threshold gates IG sign
+        self.factual_clarify_penalty = factual_clarify_penalty  # penalty for bad clarification
+        self.ig_zero_mean = ig_zero_mean  # zero-mean normalize IG across batch
+        self.conditional_bonus = conditional_bonus  # bonus only for ambiguous questions that clarify
+        self.asymmetric_bonus = asymmetric_bonus  # asymmetric: no reward for passivity, larger penalty for missed clarify
+
+
+    # ------------------------------------------------------------------
+    # Coverage Reward (IntentionGym mode)
+    # ------------------------------------------------------------------
+    def _compute_coverage_reward(self, clarify_text: str, missing_details: list, already_covered: set) -> tuple:
+        """Count NEW missing details covered by this clarify question.
+        Uses LLM-based semantic evaluation. Falls back to keyword matching."""
+        if not missing_details or not clarify_text:
+            return 0.0, set()
+
+        newly_covered = set()
+        uncovered = [(i, str(d.get("description", ""))) for i, d in enumerate(missing_details) if i not in already_covered]
+        if not uncovered:
+            return 0.0, set()
+
+        try:
+            import requests
+            details_str = "\n".join(f"[{i}] {desc}" for i, desc in uncovered)
+            prompt = (
+                f"Missing details:\n{details_str}\n\n"
+                f"Question: \"{clarify_text}\"\n\n"
+                f"Which detail indices does this question address? "
+                f"Return ONLY comma-separated numbers (e.g. 0,2). If none: none"
+            )
+            resp = requests.post(
+                "http://10.10.211.117:8002/v1/chat/completions",
+                json={"model": "default", "messages": [
+                    {"role": "system", "content": "Evaluate if a clarification question addresses specific missing details. Be strict."},
+                    {"role": "user", "content": prompt}
+                ], "temperature": 0.0, "max_tokens": 50},
+                timeout=10,
+            )
+            result = resp.json()["choices"][0]["message"]["content"].strip().lower()
+            if result != "none" and result:
+                valid_indices = {i for i, _ in uncovered}
+                for tok in result.replace(",", " ").split():
+                    try:
+                        idx = int(tok.strip())
+                        if idx in valid_indices:
+                            newly_covered.add(idx)
+                    except ValueError:
+                        continue
+        except Exception:
+            # Fallback: keyword matching
+            clarify_lower = clarify_text.lower()
+            for i, detail in enumerate(missing_details):
+                if i in already_covered:
+                    continue
+                desc = str(detail.get("description", "")).lower()
+                inquiry = str(detail.get("inquiry", "")).lower()
+                keywords = set(w for w in (desc + " " + inquiry).split() if len(w) > 3)
+                if keywords:
+                    matched = sum(1 for kw in keywords if kw in clarify_lower)
+                    if matched / len(keywords) > 0.3:
+                        newly_covered.add(i)
+
+        reward = len(newly_covered) * 0.3
+        return reward, newly_covered
 
     # ------------------------------------------------------------------
     # Discriminative Clarification Reward (DCR)
@@ -302,31 +376,22 @@ class IPORewardManager(BaseRewardManager):
             return 0.5 * self.clarify_bonus  # Conservative
 
     def _compute_clarify_reward(self, turn: dict, original_question: str) -> float:
-        """Compute clarification reward combining ATCC + DCR + negative penalty.
+        """Compute clarification reward combining ATCC + DCR.
 
         Priority:
-        1. ATCC (if enabled): full bonus for PARAMETER/RULES/SCOPE, NEGATIVE penalty for FACTUAL
+        1. ATCC (if enabled): zero bonus for FACTUAL/INTERPRETIVE questions
         2. DCR (if enabled): further filter by clarification quality
         3. Fixed bonus fallback
-
-        Key insight: "no bonus" is not enough to deter FACTUAL clarification.
-        We need an active NEGATIVE penalty to overcome PACIFIC-trained habit.
         """
         if self.atcc_mode:
-            ambig_type = self._classify_ambig_type(original_question)
-            did_clarify = (turn.get('type') == 'clarify') or bool(turn.get('content', ''))
-
-            if ambig_type in ('FACTUAL', 'INTERPRETIVE'):
-                # ACTIVE PENALTY: discourage clarifying on FACTUAL questions
-                return self.factual_clarify_penalty
-            elif ambig_type in ('PARAMETER', 'RULES', 'SCOPE'):
-                atcc_bonus = self.clarify_bonus  # Full reward
-                if self.dcr_mode:
-                    dcr_bonus = self._compute_dcr_reward(turn, original_question)
-                    return min(atcc_bonus, dcr_bonus)
-                return atcc_bonus
-            else:  # UNKNOWN
-                return 0.5 * self.clarify_bonus  # Conservative
+            atcc_bonus = self._compute_atcc_bonus(original_question)
+            if atcc_bonus == 0.0:
+                return 0.0  # No bonus for FACTUAL/INTERPRETIVE questions
+            # ATCC gave partial/full bonus → apply DCR as quality filter
+            if self.dcr_mode:
+                dcr_bonus = self._compute_dcr_reward(turn, original_question)
+                return min(atcc_bonus, dcr_bonus)  # More conservative
+            return atcc_bonus
         elif self.dcr_mode:
             return self._compute_dcr_reward(turn, original_question)
         else:
@@ -352,6 +417,9 @@ class IPORewardManager(BaseRewardManager):
         use_ablation = ablation_scores is not None and not use_counterfactual  # counterfactual takes priority
         ablation_used_count = 0
         fallback_count = 0
+
+        # Track IG reward positions for zero-mean normalization
+        ig_placement_log = []  # [(sample_idx, token_idx, ig_reward)]
 
         for i in range(batch_size):
             data_item = data[i]
@@ -399,6 +467,21 @@ class IPORewardManager(BaseRewardManager):
                         is_ambig_sample = bool(gt_req)
                 # Fallback to extra_info (may be overwritten during rollout)
                 ei = data_item.non_tensor_batch.get('extra_info', {})
+                if i == 0 and not hasattr(self, '_debug_ei_done'):
+                    print(f"[DEBUG-EI] type={type(ei).__name__}, isinstance_dict={isinstance(ei, dict)}, val={str(ei)[:200]}")
+                    self._debug_ei_done = True
+                # Parse extra_info: DataProto wraps as np.array(dtype=object)
+                import numpy as np
+                if isinstance(ei, np.ndarray):
+                    ei = ei.item() if ei.ndim == 0 else ei.tolist()
+                if isinstance(ei, np.generic):
+                    ei = ei.item()
+                if isinstance(ei, str):
+                    try:
+                        import json as _json
+                        ei = _json.loads(ei)
+                    except (ValueError, TypeError):
+                        ei = {}
                 if isinstance(ei, dict):
                     if is_ambig_sample is None:
                         is_ambig_sample = ei.get('_is_ambiguous', None)
@@ -419,7 +502,19 @@ class IPORewardManager(BaseRewardManager):
             if self.ambiguity_penalty > 0 and is_ambig_sample is False:
                 compute_ig = False
 
+            # Initialize hog_gate before conditional block (always in scope for logging)
+            hog_gate = 1.0
+
             if n_intermediate > 0 and compute_ig:
+                # Hindsight outcome gating (shared across all IG paths)
+                if self.hindsight_gating:
+                    if f1 >= 0.5:
+                        hog_gate = 1.0
+                    elif f1 < 0.3:
+                        hog_gate = -0.5
+                    else:
+                        hog_gate = 0.0
+
                 # Priority: counterfactual logprob > ablation > fallback
                 if use_counterfactual and counterfactual_ig_scores[i] is not None:
                     # ---- Counterfactual logprob IG (true counterfactual) ----
@@ -432,7 +527,8 @@ class IPORewardManager(BaseRewardManager):
 
                     for turn in intermediate_turns:
                         # Scale by alpha, with F1 gating (same as ablation path)
-                        ig_reward = self.alpha * per_turn_ig * f1
+                        ig_reward = self.alpha * per_turn_ig * (f1 if self.use_f1_gating else 1.0)
+                        ig_reward *= hog_gate  # Apply hindsight gating
                         # Floor at negative cap (don't penalize too harshly)
                         ig_reward = max(ig_reward, -0.2)
                         if turn['type'] == 'clarify' and self.clarify_bonus > 0:
@@ -457,11 +553,22 @@ class IPORewardManager(BaseRewardManager):
                         for j, (turn_type, delta) in enumerate(sample_ablation):
                             # Shift delta by threshold: only IG above threshold counts as positive
                             effective_delta = delta - self.ig_threshold
-                            clamped_delta = max(effective_delta, -0.5)  # floor at -0.5
-                            f1_effective = max(f1, 0.1)       # P0: F1 floor for hard cases
-                            ig_reward = self.alpha * clamped_delta * f1_effective
-                            # Floor at baseline (or -0.2 for negative)
-                            ig_reward = max(ig_reward, min(self.baseline_reward, -0.2))
+
+                            if self.counterfactual_gating:
+                                # OCIG-CF: let negative deltas flow (no tight floor)
+                                clamped_delta = max(effective_delta, -2.0)
+                                f1_effective = max(f1, 0.1)
+                                ig_reward = self.alpha * clamped_delta * (f1_effective if self.use_f1_gating else 1.0)
+                                ig_reward *= hog_gate
+                                # Extra penalty for clearly harmful clarification
+                                if turn_type == 'clarify' and effective_delta < -self.ig_threshold:
+                                    ig_reward += self.factual_clarify_penalty
+                            else:
+                                clamped_delta = max(effective_delta, -0.5)
+                                f1_effective = max(f1, 0.1)
+                                ig_reward = self.alpha * clamped_delta * (f1_effective if self.use_f1_gating else 1.0)
+                                ig_reward *= hog_gate
+                                ig_reward = max(ig_reward, min(self.baseline_reward, -0.2))
                             if turn_type == 'clarify' and self.clarify_bonus > 0:
                                 # Match to intermediate_turns to get content for DCR/ATCC
                                 if j < len(intermediate_turns) and intermediate_turns[j]['type'] == 'clarify':
@@ -492,7 +599,7 @@ class IPORewardManager(BaseRewardManager):
                             prev_confidence = curr_confidence
 
                             ig_raw = max(individual_relevance, marginal_gain)
-                            ig_reward = self.alpha * ig_raw * f1
+                            ig_reward = self.alpha * ig_raw * (f1 if self.use_f1_gating else 1.0)
                             ig_reward = max(ig_reward, self.baseline_reward)
                             if turn['type'] == 'clarify' and self.clarify_bonus > 0:
                                 ig_reward += self._compute_clarify_reward(turn, original_question)
@@ -519,6 +626,31 @@ class IPORewardManager(BaseRewardManager):
                         d['reward'] *= eff
                     ig_total *= eff
 
+                # Coverage reward mode: override IG with coverage-based per-turn reward
+                if self.coverage_reward_mode:
+                    _rm = data.non_tensor_batch.get('reward_model', [{}])[i] if hasattr(data.non_tensor_batch.get('reward_model', None), '__getitem__') else {}
+                    missing_details = _rm.get('missing_details', []) if isinstance(_rm, dict) else []
+                    if hasattr(missing_details, 'tolist'):
+                        missing_details = missing_details.tolist()
+                    if missing_details and len(missing_details) > 0:
+                        already_covered = set()
+                        ig_details = []  # override
+                        ig_total = 0
+                        for turn in intermediate_turns:
+                            if turn['type'] == 'clarify':
+                                clarify_text = turn.get('content', '')
+                                cov_reward, newly = self._compute_coverage_reward(
+                                    clarify_text, missing_details, already_covered)
+                                already_covered |= newly
+                                cov_reward += self.clarify_bonus  # still add clarify bonus
+                            else:
+                                cov_reward = 0.0
+                            ig_details.append({'type': turn['type'], 'delta': cov_reward, 'reward': cov_reward})
+                            ig_total += cov_reward
+                        # Terminal: coverage_rate as bonus
+                        coverage_rate = len(already_covered) / len(missing_details) if missing_details else 0
+                        reward_tensor[i, valid_response_length - 1] += coverage_rate * 0.5  # coverage bonus
+
                 # Place IG rewards at turn token positions
                 turn_positions = self.find_turn_token_positions(
                     response_str, self.tokenizer
@@ -531,6 +663,7 @@ class IPORewardManager(BaseRewardManager):
                 for idx, (action_type, token_idx) in enumerate(intermediate_positions):
                     if idx < len(ig_details):
                         reward_tensor[i, token_idx] += ig_details[idx]['reward']
+                        ig_placement_log.append((i, token_idx, ig_details[idx]['reward']))
 
             elif f1 > 0 and valid_response_length > 0 and self.efficiency_bonus > 0:
                 # No intermediate turns but answered correctly: efficiency bonus
@@ -549,12 +682,30 @@ class IPORewardManager(BaseRewardManager):
             ambig_reward = 0.0
             if self.ambiguity_penalty > 0 and valid_response_length > 0:
                 n_clarify = len([t for t in intermediate_turns if t['type'] == 'clarify'])
-                if is_ambig_sample is True and n_clarify == 0:
-                    # Should have clarified but didn't → penalty
-                    ambig_reward = -self.ambiguity_penalty
-                elif is_ambig_sample is False and n_clarify > 0:
-                    # Shouldn't have clarified but did → penalty (IG already gated off above)
-                    ambig_reward = -self.ambiguity_penalty
+                if self.asymmetric_bonus:
+                    # Asymmetric: no reward for passivity, larger penalty for missed clarify
+                    if is_ambig_sample is True and n_clarify > 0:
+                        ambig_reward = self.ambiguity_penalty  # +0.3 for correct clarify
+                    elif is_ambig_sample is True and n_clarify == 0:
+                        ambig_reward = -self.ambiguity_penalty  # -0.3 for missing clarify (symmetric penalty)
+                    elif is_ambig_sample is False and n_clarify > 0:
+                        ambig_reward = -self.ambiguity_penalty  # -0.3 for unnecessary clarify
+                    elif is_ambig_sample is False and n_clarify == 0:
+                        ambig_reward = 0.0  # NO reward for passivity
+                elif self.conditional_bonus:
+                    if is_ambig_sample is True and n_clarify > 0:
+                        ambig_reward = self.ambiguity_penalty
+                    elif is_ambig_sample is False and n_clarify == 0:
+                        ambig_reward = self.ambiguity_penalty
+                    elif is_ambig_sample is True and n_clarify == 0:
+                        ambig_reward = -self.ambiguity_penalty
+                    elif is_ambig_sample is False and n_clarify > 0:
+                        ambig_reward = -self.ambiguity_penalty
+                else:
+                    if is_ambig_sample is True and n_clarify == 0:
+                        ambig_reward = -self.ambiguity_penalty
+                    elif is_ambig_sample is False and n_clarify > 0:
+                        ambig_reward = -self.ambiguity_penalty
 
                 if ambig_reward != 0:
                     reward_tensor[i, valid_response_length - 1] += ambig_reward
@@ -591,9 +742,11 @@ class IPORewardManager(BaseRewardManager):
                 tc_str = f" tc={-self.turn_cost * n_intermediate:.3f}" if self.turn_cost > 0 else ""
                 cb_str = f" cb={self.clarify_bonus:.3f}" if self.clarify_bonus > 0 else ""
                 ab_str = f" ambig={ambig_reward:.3f}" if ambig_reward != 0 else ""
+                hog_str = f" hog={hog_gate:.1f}" if self.hindsight_gating and n_intermediate > 0 else ""
+                cf_str = " [CF]" if self.counterfactual_gating and n_intermediate > 0 else ""
                 print(
                     f"[IPOv3] F1={f1:.3f} turns={n_intermediate} invalid={n_invalid} "
-                    f"IG={ig_total:.3f}({ig_source}) conf={confidence:.3f}{tc_str}{cb_str}{ab_str} [{detail_str}] "
+                    f"IG={ig_total:.3f}({ig_source}) conf={confidence:.3f}{tc_str}{cb_str}{ab_str}{hog_str}{cf_str} [{detail_str}] "
                     f"| {response_str[:200]}"
                 )
 
@@ -603,6 +756,15 @@ class IPORewardManager(BaseRewardManager):
         elif use_ablation:
             print(f"[IPOv3] Ablation stats: {ablation_used_count} ablation, {fallback_count} fallback, "
                   f"{batch_size - ablation_used_count - fallback_count} no-turns")
+
+        # Zero-mean normalize IG rewards across batch (if enabled)
+        if self.ig_zero_mean and ig_placement_log:
+            ig_values = [r for _, _, r in ig_placement_log]
+            ig_mean = sum(ig_values) / len(ig_values)
+            if abs(ig_mean) > 1e-6:
+                for sample_idx, token_idx, _ in ig_placement_log:
+                    reward_tensor[sample_idx, token_idx] -= ig_mean
+                print(f"[IPOv3] IG zero-mean: adjusted {len(ig_placement_log)} placements by -{ig_mean:.4f}")
 
         return reward_tensor
 
@@ -783,9 +945,6 @@ def main_task(config):
             baseline_reward = config.ipo.baseline_reward
         if hasattr(config.ipo, 'clarify_bonus'):
             clarify_bonus = config.ipo.clarify_bonus
-        factual_clarify_penalty = -0.10  # Default: penalize clarify on FACTUAL
-        if hasattr(config.ipo, 'factual_clarify_penalty'):
-            factual_clarify_penalty = config.ipo.factual_clarify_penalty
         if hasattr(config.ipo, 'counterfactual_logprob'):
             counterfactual_logprob = config.ipo.counterfactual_logprob
         if hasattr(config.ipo, 'efficiency_gating'):
@@ -806,34 +965,74 @@ def main_task(config):
             atcc_mode = config.ipo.atcc_mode
         else:
             atcc_mode = False
+        if hasattr(config.ipo, 'use_f1_gating'):
+            use_f1_gating = config.ipo.use_f1_gating
+        else:
+            use_f1_gating = True
+        coverage_reward_mode = False
+        if hasattr(config.ipo, 'coverage_reward_mode'):
+            coverage_reward_mode = config.ipo.coverage_reward_mode
+        counterfactual_gating = False
+        if hasattr(config.ipo, 'counterfactual_gating'):
+            counterfactual_gating = config.ipo.counterfactual_gating
+        hindsight_gating = False
+        if hasattr(config.ipo, 'hindsight_gating'):
+            hindsight_gating = config.ipo.hindsight_gating
+        factual_clarify_penalty = -0.15
+        if hasattr(config.ipo, 'factual_clarify_penalty'):
+            factual_clarify_penalty = config.ipo.factual_clarify_penalty
+        ig_zero_mean = False
+        if hasattr(config.ipo, 'ig_zero_mean'):
+            ig_zero_mean = config.ipo.ig_zero_mean
+        conditional_bonus = False
+        if hasattr(config.ipo, 'conditional_bonus'):
+            conditional_bonus = config.ipo.conditional_bonus
+        asymmetric_bonus = False
+        if hasattr(config.ipo, 'asymmetric_bonus'):
+            asymmetric_bonus = config.ipo.asymmetric_bonus
     print(f"[IPO] alpha={alpha}, turn_cost={turn_cost}, efficiency_bonus={efficiency_bonus}, "
           f"baseline_reward={baseline_reward}, clarify_bonus={clarify_bonus}, "
-          f"factual_penalty={factual_clarify_penalty}, "
           f"counterfactual_logprob={counterfactual_logprob}, efficiency_gating={efficiency_gating}, "
           f"ig_threshold={ig_threshold}, ambiguity_penalty={ambiguity_penalty}, "
-          f"outcome_scale={outcome_scale}, dcr_mode={dcr_mode}, atcc_mode={atcc_mode}, n_agent={n_agent}")
+          f"outcome_scale={outcome_scale}, dcr_mode={dcr_mode}, atcc_mode={atcc_mode}, "
+          f"use_f1_gating={use_f1_gating}, coverage_reward_mode={coverage_reward_mode}, "
+          f"counterfactual_gating={counterfactual_gating}, hindsight_gating={hindsight_gating}, "
+          f"factual_clarify_penalty={factual_clarify_penalty}, n_agent={n_agent}")
 
     log_main("Creating IPO reward manager")
     reward_fn = IPORewardManager(
         tokenizer=tokenizer, num_examine=1, n_agent=n_agent, alpha=alpha,
         turn_cost=turn_cost, efficiency_bonus=efficiency_bonus,
         baseline_reward=baseline_reward, clarify_bonus=clarify_bonus,
-        factual_clarify_penalty=factual_clarify_penalty,
         counterfactual_logprob=counterfactual_logprob,
         efficiency_gating=efficiency_gating, max_clarify_turns=max_clarify_turns,
         ig_threshold=ig_threshold, ambiguity_penalty=ambiguity_penalty,
         outcome_scale=outcome_scale, dcr_mode=dcr_mode, atcc_mode=atcc_mode,
+        use_f1_gating=use_f1_gating,
+        coverage_reward_mode=coverage_reward_mode,
+        counterfactual_gating=counterfactual_gating,
+        hindsight_gating=hindsight_gating,
+        factual_clarify_penalty=factual_clarify_penalty,
+        ig_zero_mean=ig_zero_mean,
+        conditional_bonus=conditional_bonus,
+        asymmetric_bonus=asymmetric_bonus,
     )
     val_reward_fn = IPORewardManager(
         tokenizer=tokenizer, num_examine=2, n_agent=1, alpha=alpha,
         turn_cost=turn_cost, efficiency_bonus=efficiency_bonus,
         baseline_reward=baseline_reward, clarify_bonus=clarify_bonus,
-        factual_clarify_penalty=factual_clarify_penalty,
         counterfactual_logprob=False,  # validation uses standard reward
         efficiency_gating=efficiency_gating, max_clarify_turns=max_clarify_turns,
         ig_threshold=ig_threshold, ambiguity_penalty=ambiguity_penalty,
         outcome_scale=outcome_scale, dcr_mode=False,  # validation always uses standard reward
         atcc_mode=False,
+        use_f1_gating=True,  # validation: always use F1-gated reward (comparable to baseline)
+        counterfactual_gating=counterfactual_gating,
+        hindsight_gating=hindsight_gating,
+        factual_clarify_penalty=factual_clarify_penalty,
+        ig_zero_mean=ig_zero_mean,
+        conditional_bonus=conditional_bonus,
+        asymmetric_bonus=asymmetric_bonus,
     )
 
     log_main("Creating resource pool manager")

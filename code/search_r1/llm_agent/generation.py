@@ -12,6 +12,24 @@ from verl.utils.tracking import Tracking
 import shutil
 import requests
 
+
+def _deep_convert_numpy(obj):
+    """Recursively convert numpy types to Python natives for JSON serialization."""
+    import numpy as np
+    if isinstance(obj, np.ndarray):
+        return [_deep_convert_numpy(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _deep_convert_numpy(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_deep_convert_numpy(x) for x in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, (np.str_,)):
+        return str(obj)
+    return obj
+
 @dataclass
 class GenerationConfig:
     max_turns: int
@@ -22,6 +40,7 @@ class GenerationConfig:
     num_gpus: int
     no_think_rl: bool=False
     search_url: str = None
+    paper_store_path: str = None  # StructNav: path to paper_store.json
     topk: int = 3
     # 澄清相关配置（已取消检索）
     clarify_url: str = "http://127.0.0.1:8001/batch_generate"
@@ -55,6 +74,15 @@ class LLMGenerationManager:
         # mode = "val" if self.is_validation else "train"
         # self.traj_log_file = os.path.join(log_dir, f"traj_{mode}_{timestamp}.jsonl")
         # print(f"📁 轨迹日志将保存至: {self.traj_log_file}")
+        # StructNav: load paper store for skim/read execution
+        self.paper_store = {}
+        paper_store_path = getattr(config, 'paper_store_path', None)
+        if paper_store_path:
+            import json
+            with open(paper_store_path) as f:
+                self.paper_store = json.load(f)
+            print(f"[StructNav] Loaded {len(self.paper_store)} papers from {paper_store_path}")
+
 
     def _batch_tokenize(self, responses: List[str]) -> torch.Tensor:
         """Tokenize a batch of responses."""
@@ -72,7 +100,12 @@ class LLMGenerationManager:
             skip_special_tokens=True
         )
 
-        responses_str = [resp.split('</search>')[0] + '</search>'
+        # StructNav: add skim and read as stop tokens
+        responses_str = [resp.split("</skim>")[0] + "</skim>"
+                 if "</skim>" in resp
+                 else resp.split("</read>")[0] + "</read>"
+                 if "</read>" in resp
+                 else resp.split("</search>")[0] + "</search>"
                  if '</search>' in resp
                  else resp.split('</clarify>')[0] + '</clarify>'
                  if '</clarify>' in resp 
@@ -225,6 +258,11 @@ class LLMGenerationManager:
                     elif isinstance(target, (list, tuple)):
                         answer_hints = list(target)
 
+            # IntentionGym: pass missing_details for persona-based simulator
+            missing_details = sample_extra.get('missing_details', None)
+            if missing_details is not None:
+                missing_details = _deep_convert_numpy(missing_details)
+
             metadata.append(
                 {
                     'ambiguous_question': ambig_q,
@@ -232,6 +270,7 @@ class LLMGenerationManager:
                     'data_source': data_source,
                     'clarify_context': clarify_context,
                     'answer_hints': answer_hints,
+                    'missing_details': missing_details,
                 }
             )
         return metadata
@@ -478,6 +517,9 @@ class LLMGenerationManager:
             if self.config.enable_clarify:
                 # 从rollings中提取extra_info，包含gold_question等信息
                 extra_data = self._prepare_clarify_metadata(rollings)
+            # StructNav: pass extra_info for paper_store lookup
+            if hasattr(rollings, 'non_tensor_batch') and 'extra_info' in rollings.non_tensor_batch:
+                self._current_extra_info = rollings.non_tensor_batch['extra_info']
             next_obs, dones, valid_action, is_search, is_clarify = self.execute_predictions(
                 responses_str, self.tokenizer.pad_token, active_mask, do_search=True, extra_data=extra_data
             )
@@ -775,9 +817,11 @@ class LLMGenerationManager:
                     is_clarify.append(0)
                 elif action == 'search':
                     if not self.config.enable_search:
-                        # Search disabled — treat as invalid action
-                        next_obs.append(f'\nSearch is not available for this task. '
-                            'Use <clarify> to ask clarifying questions or <answer> to give your final answer.\n')
+                        # Search disabled — treat as invalid, guide to correct actions
+                        next_obs.append(f'\nMy previous action is invalid. '
+                            'If I want to clarify, I should put the question between <clarify> and </clarify>. '
+                            'If I want to give the final answer, I should put the answer between <answer> and </answer>. '
+                            'Let me try again.\n')
                         dones.append(0)
                         valid_action.append(0)
                         is_search.append(0)
@@ -809,11 +853,32 @@ class LLMGenerationManager:
                         valid_action.append(1)
                         is_search.append(0)
                         is_clarify.append(1)
+                elif action == 'skim':
+                    # StructNav: execute skim on document
+                    paper_structure = self._get_paper_structure(i) if hasattr(self, '_get_paper_structure') else {'paragraphs': []}
+                    obs = self._execute_skim(contents[i], paper_structure)
+                    next_obs.append(f'\n\n<observation>{obs}</observation>\n\n')
+                    dones.append(0)
+                    valid_action.append(1)
+                    is_search.append(0)
+                    is_clarify.append(0)
+                elif action == 'read':
+                    # StructNav: execute read on document
+                    paper_structure = self._get_paper_structure(i) if hasattr(self, '_get_paper_structure') else {'paragraphs': []}
+                    obs = self._execute_read(contents[i], paper_structure)
+                    next_obs.append(f'\n\n<observation>{obs}</observation>\n\n')
+                    dones.append(0)
+                    valid_action.append(1)
+                    is_search.append(0)
+                    is_clarify.append(0)
                 else:
-                    next_obs.append(f'\nMy previous action is invalid. \
-If I want to search, I should put the query between <search> and </search>. \
-If I want to clarify, I should put the question between <clarify> and </clarify>. \
-If I want to give the final answer, I should put the answer between <answer> and </answer>. Let me try again.\n')
+                    invalid_msg = (
+                        "\nMy previous action is invalid. "
+                        "If I want to clarify, I should put the question between <clarify> and </clarify>. "
+                        "If I want to give the final answer, I should put the answer between <answer> and </answer>. "
+                        "Let me try again.\n"
+                    )
+                    next_obs.append(invalid_msg)
                     dones.append(0)
                     valid_action.append(0)
                     is_search.append(0)
@@ -841,7 +906,7 @@ If I want to give the final answer, I should put the answer between <answer> and
             action = None
             content = ''
 
-            tag_match = re.search(r'<(search|clarify|answer)>(.*?)</\1>', prediction, re.DOTALL | re.IGNORECASE)
+            tag_match = re.search(r'<(skim|read|search|clarify|answer)>(.*?)</\1>', prediction, re.DOTALL | re.IGNORECASE)
             if tag_match:
                 action = tag_match.group(1).lower()
                 content = tag_match.group(2).strip()
@@ -850,7 +915,7 @@ If I want to give the final answer, I should put the answer between <answer> and
                 line_match = re.search(r'ACTION\s*:\s*\*\*(\w+)\*\*\s*:\s*(.*)', prediction, re.IGNORECASE | re.DOTALL)
                 if line_match:
                     candidate = line_match.group(1).lower()
-                    if candidate in {'search', 'clarify', 'answer'}:
+                    if candidate in {'skim', 'read', 'search', 'clarify', 'answer'}:
                         action = candidate
                         content = line_match.group(2).strip()
                     elif candidate == 'think':
@@ -861,6 +926,58 @@ If I want to give the final answer, I should put the answer between <answer> and
             contents.append(content)
 
         return actions, contents
+
+
+
+    def _get_paper_structure(self, sample_idx: int) -> dict:
+        """Get document paragraphs for a sample from paper_store."""
+        if not hasattr(self, '_current_extra_info') or not self._current_extra_info:
+            return {'paragraphs': []}
+        if sample_idx >= len(self._current_extra_info):
+            return {'paragraphs': []}
+        extra = self._current_extra_info[sample_idx]
+        if isinstance(extra, str):
+            import json
+            extra = json.loads(extra)
+        paper_id = extra.get('paper_id', '')
+        if paper_id in self.paper_store:
+            return self.paper_store[paper_id]
+        return {'paragraphs': []}
+
+    def _execute_skim(self, content: str, paper_structure: dict) -> str:
+        """Execute skim action: return first sentence of each paragraph in range."""
+        import re
+        try:
+            parts = content.split(',')
+            start = int(parts[0].strip())
+            end = int(parts[1].strip()) if len(parts) > 1 else start + 10
+            paragraphs = paper_structure.get('paragraphs', [])
+            lines = []
+            for i in range(max(0, start), min(end, len(paragraphs))):
+                para = paragraphs[i]
+                first_sent = re.split(r'(?<=[.!?])\s+', para)[0]
+                if len(first_sent.split()) > 30:
+                    first_sent = ' '.join(first_sent.split()[:30]) + '...'
+                lines.append(f'[{i}] {first_sent}')
+            return '\n'.join(lines) if lines else '[No content in range]'
+        except Exception as e:
+            return f'[Skim error: {e}]'
+
+    def _execute_read(self, content: str, paper_structure: dict) -> str:
+        """Execute read action: return full text of paragraphs in range (max 5)."""
+        try:
+            parts = content.split(',')
+            start = int(parts[0].strip())
+            end = int(parts[1].strip()) if len(parts) > 1 else start + 3
+            end = min(end, start + 5)  # max 5 paragraphs
+            paragraphs = paper_structure.get('paragraphs', [])
+            lines = []
+            for i in range(max(0, start), min(end, len(paragraphs))):
+                lines.append(f'[{i}] {paragraphs[i]}')
+            return '\n\n'.join(lines) if lines else '[No content in range]'
+        except Exception as e:
+            return f'[Read error: {e}]'
+
 
     def _batch_search(self, queries: List[str]) -> List[str]:
         """Call retrieval server for batch search queries."""
@@ -919,6 +1036,11 @@ If I want to give the final answer, I should put the answer between <answer> and
                 unambiguous_q = (metadata.get('unambiguous_question') or metadata.get('gold_question') or ambiguous_q).strip()
                 context = (metadata.get('clarify_context') or metadata.get('context') or "").strip()
 
+                # Fix: For AmbigNQ (no table context), use gold_question to help simulator answer
+                data_source = str(metadata.get('data_source', 'generic'))
+                if not context and data_source == 'ambignq' and unambiguous_q and unambiguous_q != ambiguous_q:
+                    context = f'The user asked: \"{ambiguous_q}\" They specifically meant: \"{unambiguous_q}\"'
+
                 # Extract answer_hints for leakage detection
                 answer_hints = metadata.get('answer_hints', [])
                 if answer_hints and not isinstance(answer_hints, list):
@@ -932,6 +1054,7 @@ If I want to give the final answer, I should put the answer between <answer> and
                     "context": context,
                     "data_source": str(metadata.get('data_source', 'generic')),
                     "answer_hints": answer_hints if answer_hints else None,
+                    "missing_details": metadata.get('missing_details', None),
                 })
 
             print(f"[DEBUG] Sending {len(clarify_queries)} clarify queries to {self.config.clarify_url}")

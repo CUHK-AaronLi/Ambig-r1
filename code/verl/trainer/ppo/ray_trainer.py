@@ -700,6 +700,9 @@ class RayPPOTrainer(object):
                 metrics[f'val/answer_action_rate/{ds}'] = stats['answer'] / total_actions
             metrics[f'val/avg_clarify/{ds}'] = stats['clarify'] / n
             metrics[f'val/avg_search/{ds}'] = stats['search'] / n
+            # Question-level clarify rate (% of questions that had at least 1 clarify)
+            n_questions_clarified = len(stats['f1s_with_clarify'])
+            metrics[f'val/question_clarify_rate/{ds}'] = n_questions_clarified / n
             # Post-Clarify F1: F1 only on samples that clarified
             if len(stats['f1s_with_clarify']) > 0:
                 metrics[f'val/post_clarify_f1/{ds}'] = np.mean(stats['f1s_with_clarify'])
@@ -903,9 +906,15 @@ class RayPPOTrainer(object):
                 if self.config.do_search:
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n_agent, interleave=True)
 
+                # Save extra_info before pop (needed by reward for ambiguity labels)
+                _saved_extra_info = batch.non_tensor_batch.get('extra_info', None)
                 # pop those keys for generation, include extra_info for clarify action
                 gen_batch = batch.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'], 
                                     non_tensor_batch_keys=['extra_info'])
+
+                # Restore extra_info for reward function (pop removed it)
+                if _saved_extra_info is not None:
+                    batch.non_tensor_batch['extra_info'] = _saved_extra_info
 
                 ####################
                 # original code here
